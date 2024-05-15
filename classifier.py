@@ -4,6 +4,7 @@ import csv
 
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import f1_score, accuracy_score
 
@@ -46,11 +47,13 @@ class BertSentimentClassifier(torch.nn.Module):
                 param.requires_grad = False
             elif config.fine_tune_mode == 'full-model':
                 param.requires_grad = True
+        
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        
+        ## TODO maybe add complexity to classification layer, could be MLP with activations in between
+        self.linear_proj = nn.Linear(config.hidden_size, self.num_labels)
 
         # Create any instance variables you need to classify the sentiment of BERT embeddings.
-        ### TODO
-        raise NotImplementedError
-
 
     def forward(self, input_ids, attention_mask):
         '''Takes a batch of sentences and returns logits for sentiment classes'''
@@ -58,8 +61,13 @@ class BertSentimentClassifier(torch.nn.Module):
         # HINT: You should consider what is an appropriate return value given that
         # the training loop currently uses F.cross_entropy as the loss function.
         ### TODO
-        raise NotImplementedError
 
+        last_hidden_state, pooler_output = {v for k,v in self.bert(input_ids, attention_mask).items()}
+        embedding = self.dropout(pooler_output)
+
+        proj = self.linear_proj(embedding)
+        logits = F.softmax(proj, dim=1)
+        return logits
 
 
 class SentimentDataset(Dataset):
