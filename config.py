@@ -84,6 +84,15 @@ class PretrainedConfig(object):
     # Drop the transformers version info
     kwargs.pop("transformers_version", None)
 
+    # Downstream task arugments
+    self.sentiment_logits = kwargs.pop("sentiment_logits", 5)
+    self.paraphrase_logits = kwargs.pop("paraphrase_logits", 1)
+    self.similarity_logits = kwargs.pop("similarity_logits", 1)
+
+    self.sentiment_dropout_probability = kwargs.pop("sentiment_dropout_probability", 0.1)
+    self.paraphrase_dropout_probability = kwargs.pop("paraphrase_dropout_probability", 0.1)
+    self.similarity_dropout_probability = kwargs.pop("similarity_dropout_probability", 0.1)
+    
     # Additional attributes without default values
     for key, value in kwargs.items():
       try:
