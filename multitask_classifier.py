@@ -73,13 +73,14 @@ class MultitaskBERT(nn.Module):
                 param.requires_grad = True
         # You will want to add layers here to perform the downstream tasks.
         ### TODO
-        self.sentiment_layer = nn.Linear(self.bert.config.hidden_size, 5)
-        self.paraphrase_layer = nn.Linear(self.bert.config.hidden_size*2, 1)
-        self.similarity_layer = nn.Linear(self.bert.config.hidden_size*2, 1)
+        self.sentiment_layer = nn.Linear(self.bert.config.hidden_size, self.bert.config.sentiment_logits)
+        self.paraphrase_layer = nn.Linear(self.bert.config.hidden_size*2, self.bert.config.paraphrase_logits)
+        self.similarity_layer = nn.Linear(self.bert.config.hidden_size*2, self.bert.config.similarity_logits)
 
-        self.sentiment_dropout = nn.Dropout(.1)
-        self.paraphrase_dropout = nn.Dropout(.1)
-        self.similarity_dropout = nn.Dropout(.1)
+        # It is possible the dropout layers are unnecessary / undesirable but it is a config value
+        self.sentiment_dropout = nn.Dropout(self.bert.config.sentiment_dropout_probability)
+        self.paraphrase_dropout = nn.Dropout(self.bert.config.paraphrase_dropout_probability)
+        self.similarity_dropout = nn.Dropout(self.bert.config.similarity_dropout_probability)
 
 
     def forward(self, input_ids, attention_mask):
