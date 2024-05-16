@@ -264,6 +264,7 @@ def train(args):
 
     model = BertSentimentClassifier(config)
     model = model.to(device)
+    print(f'training device, {device}\n')
 
     lr = args.lr
     optimizer = AdamW(model.parameters(), lr=lr)
