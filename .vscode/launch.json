@@ -11,12 +11,12 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "args": [
-                "--fine-tune-mode",
-                "last-linear-layer",
-                "--lr",
-                "1e-3"
-            ],
+            //"args": [
+            //    "--fine-tune-mode",
+            //    "last-linear-layer",
+            //    "--lr",
+            //    "1e-3"
+            //],
         }
     ]
 }
