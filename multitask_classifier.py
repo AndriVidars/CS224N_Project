@@ -73,8 +73,9 @@ class MultitaskBERT(nn.Module):
                 param.requires_grad = True
         # You will want to add layers here to perform the downstream tasks.
         ### TODO
-        raise NotImplementedError
-
+        self.sentiment_classifier = nn.Linear(BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES)
+        self.paraphrase_classifier = nn.Linear(BERT_HIDDEN_SIZE * 2, 1)
+        self.similarity_classifier = nn.Linear(BERT_HIDDEN_SIZE * 2, 1)
 
     def forward(self, input_ids, attention_mask):
         'Takes a batch of sentences and produces embeddings for them.'
@@ -83,7 +84,9 @@ class MultitaskBERT(nn.Module):
         # When thinking of improvements, you can later try modifying this
         # (e.g., by adding other layers).
         ### TODO
-        raise NotImplementedError
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        cls_embedding = outputs['last_hidden_state'][:, 0, :]
+        return cls_embedding
 
 
     def predict_sentiment(self, input_ids, attention_mask):
@@ -93,8 +96,9 @@ class MultitaskBERT(nn.Module):
         Thus, your output should contain 5 logits for each sentence.
         '''
         ### TODO
-        raise NotImplementedError
-
+        cls_embedding = self.forward(input_ids, attention_mask)
+        logits = self.sentiment_classifier(cls_embedding)
+        return logits
 
     def predict_paraphrase(self,
                            input_ids_1, attention_mask_1,
@@ -104,7 +108,12 @@ class MultitaskBERT(nn.Module):
         during evaluation.
         '''
         ### TODO
-        raise NotImplementedError
+        cls_embedding_1 = self.forward(input_ids_1, attention_mask_1)
+        cls_embedding_2 = self.forward(input_ids_2, attention_mask_2)
+        cls_embedding = torch.cat([cls_embedding_1, cls_embedding_2], dim=1)
+
+        logits = self.paraphrase_classifier(cls_embedding)
+        return logits
 
 
     def predict_similarity(self,
@@ -114,7 +123,12 @@ class MultitaskBERT(nn.Module):
         Note that your output should be unnormalized (a logit).
         '''
         ### TODO
-        raise NotImplementedError
+        cls_embedding_1 = self.forward(input_ids_1, attention_mask_1)
+        cls_embedding_2 = self.forward(input_ids_2, attention_mask_2)
+        cls_embedding = torch.cat([cls_embedding_1, cls_embedding_2], dim=1)
+
+        logits = self.similarity_classifier(cls_embedding)
+        return logits
 
 
 
@@ -336,5 +350,7 @@ if __name__ == "__main__":
     args = get_args()
     args.filepath = f'{args.fine_tune_mode}-{args.epochs}-{args.lr}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
+    print("=== Training Multitask BERT ===")
     train_multitask(args)
+    print("=== Testing Multitask BERT ===")
     test_multitask(args)
