@@ -18,29 +18,42 @@ class DataAugmentator():
         self.tokenizer = T5Tokenizer.from_pretrained(model_name)
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         print(f'--------\ndevice, {self.device}\n--------')
-    
+        
     def generate_paraphrases(self, text, rep):
         input_text = f"{self.prompt_base} {text} </s>"
         input_ids = self.tokenizer.encode(input_text, return_tensors="pt").to(self.device)
         input_length = input_ids.shape[1] # input length in number of tokens
-        max_length = int(1.5 * input_length + 10)
-        # maybe add min_length, though that is likely to cause memory issues
-        num_beam_groups = 10  # Set this to a value larger than 1 for diversity
-        with torch.no_grad():
-            outputs = self.model.generate(
-                input_ids=input_ids,
-                max_length=max_length,
-                num_beams=10,
-                num_return_sequences=rep,
-                temperature=1.0, # todo, modify, or try different values
-                top_k=50,
-                top_p=0.95,
-                diversity_penalty=1.25,
-                num_beam_groups=num_beam_groups,
-                no_repeat_ngram_size=2,
-                early_stopping=True,
-                do_sample=False  
-            )
+        
+        if input_length > 375:
+            print('input sentence too long') # likely to cause memory issues
+            return None
+        
+        max_length = max(512, int(1.25 * input_length))
+        min_length = int(0.6 * input_length)
+        try:
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    input_ids=input_ids,
+                    max_length=max_length,
+                    min_length=min_length,
+                    num_beams=10,
+                    num_return_sequences=rep,
+                    temperature=1.0, # todo, modify, or try different values
+                    top_k=50,
+                    top_p=0.95,
+                    diversity_penalty=1.75,
+                    num_beam_groups=5,
+                    no_repeat_ngram_size=2,
+                    early_stopping=True,
+                    do_sample=False  
+                )
+        except RuntimeError as e:
+            if 'CUDA out of memory' in str(e):
+                print("CUDA out of memory. Resetting model and retrying...")
+                torch.cuda.empty_cache()  # Clear CUDA memory
+            else:
+                print(f"RuntimeError: {e}")
+            return None
 
         return [self.tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
 
@@ -48,9 +61,15 @@ class DataAugmentator():
         # Augment training data
         # Get rep paraphrases for example in the dataset
         data_out = []
+        cnt_miss = 0
         for i, s in tqdm(enumerate(text)):
             paraphrases = self.generate_paraphrases(s, rep)
-            data_out.append((s, labels[i], paraphrases))
+            if paraphrases:
+                data_out.append((s, labels[i], paraphrases))
+            else:
+                cnt_miss += 1
+        
+        print(f'total number of misses due to memory constraints, {cnt_miss}')
         return data_out
 
 def generate_custom_id(length=24):
