@@ -10,7 +10,8 @@ from sklearn.metrics import f1_score, accuracy_score
 
 from tokenizer import BertTokenizer
 from bert import BertModel
-from optimizer import AdamW
+#from optimizer import AdamW
+from transformers import AdamW
 from tqdm import tqdm
 
 
@@ -38,19 +39,30 @@ class BertSentimentClassifier(torch.nn.Module):
     def __init__(self, config):
         super(BertSentimentClassifier, self).__init__()
         self.num_labels = config.num_labels
-        self.bert = BertModel.from_pretrained('bert-base-uncased')
+        if config.fine_tune_mode == 'lora':
+            self.bert = BertModel.from_pretrained('bert-base-uncased',  
+                                                use_lora=True,
+                                                lora_rank = config.lora_rank,
+                                                lora_svd_init=config.lora_svd_init)
+        else:
+            self.bert = BertModel.from_pretrained('bert-base-uncased')
 
         # Pretrain mode does not require updating BERT paramters.
-        assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
-        for param in self.bert.parameters():
-            if config.fine_tune_mode == 'last-linear-layer':
-                param.requires_grad = False
-            elif config.fine_tune_mode == 'full-model':
-                param.requires_grad = True
+        assert config.fine_tune_mode in ["last-linear-layer", "full-model", "lora"]
+        if config.fine_tune_mode == 'lora':
+            for name, param in self.bert.named_parameters():
+                if "lora" in name or ("bert" in name and 'bias' in name):
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False   
+        else:
+            for param in self.bert.parameters():
+                if config.fine_tune_mode == 'last-linear-layer':
+                    param.requires_grad = False
+                elif config.fine_tune_mode == 'full-model':
+                    param.requires_grad = True
         
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        
-        ## TODO maybe add complexity to classification layer, could be MLP with activations in between
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)     
         self.linear_proj = nn.Linear(config.hidden_size, self.num_labels)
 
         # Create any instance variables you need to classify the sentiment of BERT embeddings.
@@ -258,7 +270,10 @@ def train(args):
               'num_labels': num_labels,
               'hidden_size': 768,
               'data_dir': '.',
-              'fine_tune_mode': args.fine_tune_mode}
+              'fine_tune_mode': args.fine_tune_mode,
+              'lora_rank': args.lora_rank,
+              'lora_svd_init': args.lora_svd_init
+              }
 
     config = SimpleNamespace(**config)
 
@@ -266,8 +281,16 @@ def train(args):
     model = model.to(device)
     print(f'training device, {device}\n')
 
-    lr = args.lr
-    optimizer = AdamW(model.parameters(), lr=lr)
+    n_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters, {format(n_trainable_params, ',')}")
+    
+    # set different learning rate for 
+    optimizer = AdamW([
+    {'params': [param for name, param in model.named_parameters() if 'bert' in name], 'lr': args.lr_bert},
+    {'params': [param for name, param in model.named_parameters() if 'bert' not in name], 'lr': args.lr_class},
+    ])
+
+
     best_dev_acc = 0
 
     # Run for the specified number of epochs.
@@ -344,14 +367,19 @@ def get_args():
     parser.add_argument("--seed", type=int, default=11711)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--fine-tune-mode", type=str,
-                        help='last-linear-layer: the BERT parameters are frozen and the task specific head parameters are updated; full-model: BERT parameters are updated as well',
-                        choices=('last-linear-layer', 'full-model'), default="last-linear-layer")
+                        help='last-linear-layer: the BERT parameters are frozen and the task specific head parameters are updated; full-model: BERT parameters are updated as well, lora:lora on bert layers',
+                        choices=('last-linear-layer', 'full-model', 'lora'), default="last-linear-layer")
     parser.add_argument("--use_gpu", action='store_true')
 
     parser.add_argument("--batch_size", help='sst: 64, cfimdb: 8 can fit a 12GB GPU', type=int, default=8)
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
-    parser.add_argument("--lr", type=float, help="learning rate, default lr for 'pretrain': 1e-3, 'finetune': 1e-5",
+    parser.add_argument("--lr_bert", type=float, help="learning rate for bert layers, full or lora",
                         default=1e-3)
+    parser.add_argument("--lr_class", type=float, help="learning rate for classification layers",
+                        default=1e-3)
+    parser.add_argument("--lora_rank", type=int, help="rank of lora adapters",
+                        default=8)
+    parser.add_argument("--lora_svd_init", action='store_true')
 
     args = parser.parse_args()
     return args
@@ -362,30 +390,52 @@ if __name__ == "__main__":
     seed_everything(args.seed)
 
     print('Training Sentiment Classifier on SST...')
+
+    base_filepath_sst = f'classifier_{args.fine_tune_mode}'
+    base_dev_out = f'predictions/{args.fine_tune_mode}'
+    base_test_out = f'predictions/{args.fine_tune_mode}'
+
+    if args.fine_tune_mode == 'lora':
+        lora_details = f'_{args.lora_rank}_{args.lora_svd_init}'
+    else:
+        lora_details = ''
+
+    filepath_sst = f'sst-{base_filepath_sst}{lora_details}_{args.lr_bert}_{args.lr_class}.pt'
+    dev_out_sst = f'{base_dev_out}{lora_details}_{args.lr_bert}_{args.lr_class}-sst-dev-out.csv'
+    test_out_sst = f'{base_test_out}{lora_details}_{args.lr_bert}_{args.lr_class}-sst-test-out.csv'
+
+    filepath_cfimdb = f'cfimdb-{base_filepath_sst}{lora_details}_{args.lr_bert}_{args.lr_class}.pt'
+    dev_out_cdimdb = f'{base_dev_out}{lora_details}_{args.lr_bert}_{args.lr_class}-cfimdb-dev-out.csv'
+    test_out_cfimdb = f'{base_test_out}{lora_details}_{args.lr_bert}_{args.lr_class}-cdimdb-test-out.csv'
+
     config = SimpleNamespace(
-        filepath='sst-classifier.pt',
-        lr=args.lr,
+        filepath=filepath_sst,
+        lr_bert=args.lr_bert,
+        lr_class=args.lr_class,
         use_gpu=args.use_gpu,
         epochs=args.epochs,
         batch_size=args.batch_size,
         hidden_dropout_prob=args.hidden_dropout_prob,
-        train='data/ids-sst-train.csv',
+        train='data/ids-sst-train.csv', # modify to use augmented data
         dev='data/ids-sst-dev.csv',
         test='data/ids-sst-test-student.csv',
         fine_tune_mode=args.fine_tune_mode,
-        dev_out = 'predictions/' + args.fine_tune_mode + '-sst-dev-out.csv',
-        test_out = 'predictions/' + args.fine_tune_mode + '-sst-test-out.csv'
+        dev_out = dev_out_sst,
+        test_out = test_out_sst,
+        lora_rank=args.lora_rank,
+        lora_svd_init=args.lora_svd_init
     )
 
     train(config)
-
+    
     print('Evaluating on SST...')
     test(config)
 
     print('Training Sentiment Classifier on cfimdb...')
     config = SimpleNamespace(
-        filepath='cfimdb-classifier.pt',
-        lr=args.lr,
+        filepath=filepath_cfimdb,
+        lr_bert=args.lr_bert,
+        lr_class=args.lr_class,
         use_gpu=args.use_gpu,
         epochs=args.epochs,
         batch_size=8,
@@ -394,8 +444,10 @@ if __name__ == "__main__":
         dev='data/ids-cfimdb-dev.csv',
         test='data/ids-cfimdb-test-student.csv',
         fine_tune_mode=args.fine_tune_mode,
-        dev_out = 'predictions/' + args.fine_tune_mode + '-cfimdb-dev-out.csv',
-        test_out = 'predictions/' + args.fine_tune_mode + '-cfimdb-test-out.csv'
+        dev_out = dev_out_cdimdb,
+        test_out = test_out_cfimdb,
+        lora_rank=args.lora_rank,
+        lora_svd_init=args.lora_svd_init
     )
 
     train(config)

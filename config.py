@@ -10,6 +10,10 @@ class PretrainedConfig(object):
   is_composition: bool = False
 
   def __init__(self, **kwargs):
+    self.use_lora = False # default
+    self.lora_rank = 8
+    self.lora_svd_init = False
+
     # Attributes with defaults
     self.return_dict = kwargs.pop("return_dict", True)
     self.output_hidden_states = kwargs.pop("output_hidden_states", False)

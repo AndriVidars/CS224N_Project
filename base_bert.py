@@ -48,6 +48,10 @@ class BertPreTrainedModel(nn.Module):
     use_auth_token = kwargs.pop("use_auth_token", None)
     revision = kwargs.pop("revision", None)
     mirror = kwargs.pop("mirror", None)
+    use_lora = kwargs.pop("use_lora", False)
+    lora_rank = kwargs.pop("lora_rank", 8)
+    lora_svd_init = kwargs.pop("lora_svd_init", False)
+
 
     # Load config if we don't provide a configuration
     if not isinstance(config, PretrainedConfig):
@@ -106,6 +110,10 @@ class BertPreTrainedModel(nn.Module):
       resolved_archive_file = None
 
     config.name_or_path = pretrained_model_name_or_path
+    config.use_lora = use_lora
+    config.lora_rank = lora_rank
+    config.lora_svd_init = lora_svd_init
+
 
     # Instantiate model.
     model = cls(config, *model_args, **model_kwargs)

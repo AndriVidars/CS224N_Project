@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from base_bert import BertPreTrainedModel
 from utils import *
 import math
+from lora_linear import replace_with_lora_layers
 
 class BertSelfAttention(nn.Module):
   def __init__(self, config):
@@ -160,6 +161,14 @@ class BertModel(BertPreTrainedModel):
 
     self.init_weights()
 
+    print(f'use_lora, {config.use_lora}')
+    if config.use_lora:
+      print(f'lora_rank, {config.lora_rank}')
+      print(f'lora_svd_init, {config.lora_svd_init}')
+      lora_layers = [name for name, m in self.named_modules() if isinstance(m, nn.Linear)]
+      replace_with_lora_layers(self, lora_layers, rank=config.lora_rank, svd_init=config.lora_svd_init)
+
+    
   def embed(self, input_ids):
     input_shape = input_ids.size()
     seq_length = input_shape[1]

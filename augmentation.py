@@ -29,19 +29,19 @@ class DataAugmentator():
             return None
         
         max_length = max(512, int(1.25 * input_length))
-        min_length = int(0.6 * input_length)
+        min_length = int(0.75 * input_length)
         try:
             with torch.no_grad():
                 outputs = self.model.generate(
                     input_ids=input_ids,
-                    max_length=max_length,
-                    min_length=min_length,
+                    #max_length=max_length,
+                    #min_length=min_length,
                     num_beams=10,
                     num_return_sequences=rep,
                     temperature=1.0, # todo, modify, or try different values
                     top_k=50,
                     top_p=0.95,
-                    diversity_penalty=1.75,
+                    diversity_penalty=1.25,
                     num_beam_groups=5,
                     no_repeat_ngram_size=2,
                     early_stopping=True,
