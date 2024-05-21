@@ -43,9 +43,10 @@ class BertSentimentClassifier(torch.nn.Module):
             self.bert = BertModel.from_pretrained('bert-base-uncased',  
                                                 use_lora=True,
                                                 lora_rank = config.lora_rank,
-                                                lora_svd_init=config.lora_svd_init)
+                                                lora_svd_init=config.lora_svd_init,
+                                                use_moe=config.use_moe)
         else:
-            self.bert = BertModel.from_pretrained('bert-base-uncased')
+            self.bert = BertModel.from_pretrained('bert-base-uncased', use_moe=config.use_moe)
 
         # Pretrain mode does not require updating BERT paramters.
         assert config.fine_tune_mode in ["last-linear-layer", "full-model", "lora"]
@@ -272,7 +273,8 @@ def train(args):
               'data_dir': '.',
               'fine_tune_mode': args.fine_tune_mode,
               'lora_rank': args.lora_rank,
-              'lora_svd_init': args.lora_svd_init
+              'lora_svd_init': args.lora_svd_init,
+              'use_moe': args.use_moe
               }
 
     config = SimpleNamespace(**config)
@@ -381,7 +383,7 @@ def get_args():
                         default=8)
     parser.add_argument("--lora_svd_init", action='store_true')
     parser.add_argument("--weight_decay", type=float, default=0.0)
-
+    parser.add_argument("--use_moe", action='store_true')
 
     args = parser.parse_args()
     return args
@@ -401,14 +403,18 @@ if __name__ == "__main__":
         lora_details = f'_{args.lora_rank}_{args.lora_svd_init}'
     else:
         lora_details = ''
+    if args.use_moe:
+        moe_details='_moe'
+    else:
+        moe_details = ''
 
-    filepath_sst = f'sst-{base_filepath_sst}{lora_details}_{args.lr_bert}_{args.lr_class}.pt'
-    dev_out_sst = f'{base_dev_out}{lora_details}_{args.lr_bert}_{args.lr_class}-sst-dev-out.csv'
-    test_out_sst = f'{base_test_out}{lora_details}_{args.lr_bert}_{args.lr_class}-sst-test-out.csv'
+    filepath_sst = f'sst-{base_filepath_sst}{moe_details}{lora_details}_{args.lr_bert}_{args.lr_class}.pt'
+    dev_out_sst = f'{base_dev_out}{moe_details}{lora_details}_{args.lr_bert}_{args.lr_class}-sst-dev-out.csv'
+    test_out_sst = f'{base_test_out}{moe_details}{lora_details}_{args.lr_bert}_{args.lr_class}-sst-test-out.csv'
 
-    filepath_cfimdb = f'cfimdb-{base_filepath_sst}{lora_details}_{args.lr_bert}_{args.lr_class}.pt'
-    dev_out_cdimdb = f'{base_dev_out}{lora_details}_{args.lr_bert}_{args.lr_class}-cfimdb-dev-out.csv'
-    test_out_cfimdb = f'{base_test_out}{lora_details}_{args.lr_bert}_{args.lr_class}-cdimdb-test-out.csv'
+    filepath_cfimdb = f'cfimdb-{base_filepath_sst}{moe_details}{lora_details}_{args.lr_bert}_{args.lr_class}.pt'
+    dev_out_cdimdb = f'{base_dev_out}{moe_details}{lora_details}_{args.lr_bert}_{args.lr_class}-cfimdb-dev-out.csv'
+    test_out_cfimdb = f'{base_test_out}{moe_details}{lora_details}_{args.lr_bert}_{args.lr_class}-cdimdb-test-out.csv'
 
     config = SimpleNamespace(
         filepath=filepath_sst,
@@ -426,7 +432,8 @@ if __name__ == "__main__":
         test_out = test_out_sst,
         lora_rank=args.lora_rank,
         lora_svd_init=args.lora_svd_init,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        use_moe=args.use_moe
     )
 
     train(config)
@@ -451,7 +458,8 @@ if __name__ == "__main__":
         test_out = test_out_cfimdb,
         lora_rank=args.lora_rank,
         lora_svd_init=args.lora_svd_init,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        use_moe=args.use_moe
     )
 
     train(config)

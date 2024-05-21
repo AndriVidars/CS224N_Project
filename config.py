@@ -13,6 +13,7 @@ class PretrainedConfig(object):
     self.use_lora = False # default
     self.lora_rank = 8
     self.lora_svd_init = False
+    self.use_moe = False
 
     # Attributes with defaults
     self.return_dict = kwargs.pop("return_dict", True)

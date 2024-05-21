@@ -51,7 +51,7 @@ class BertPreTrainedModel(nn.Module):
     use_lora = kwargs.pop("use_lora", False)
     lora_rank = kwargs.pop("lora_rank", 8)
     lora_svd_init = kwargs.pop("lora_svd_init", False)
-
+    use_moe = kwargs.pop("use_moe", False)
 
     # Load config if we don't provide a configuration
     if not isinstance(config, PretrainedConfig):
@@ -113,6 +113,7 @@ class BertPreTrainedModel(nn.Module):
     config.use_lora = use_lora
     config.lora_rank = lora_rank
     config.lora_svd_init = lora_svd_init
+    config.use_moe=use_moe
 
 
     # Instantiate model.

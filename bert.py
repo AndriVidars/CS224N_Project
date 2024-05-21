@@ -5,6 +5,7 @@ from base_bert import BertPreTrainedModel
 from utils import *
 import math
 from lora_linear import replace_with_lora_layers
+from moe import MoE
 
 class BertSelfAttention(nn.Module):
   def __init__(self, config):
@@ -89,12 +90,29 @@ class BertLayer(nn.Module):
     self.attention_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
     self.attention_dropout = nn.Dropout(config.hidden_dropout_prob)
     # Feed forward.
+
+    # this is only included to load weights from pretrained
     self.interm_dense = nn.Linear(config.hidden_size, config.intermediate_size)
     self.interm_af = F.gelu
+
+    # This can be swapped for MoE
+    self.ffn = nn.Sequential(
+      self.interm_dense,
+      nn.GELU()
+    )
+
     # Add-norm for feed forward.
     self.out_dense = nn.Linear(config.intermediate_size, config.hidden_size)
     self.out_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
     self.out_dropout = nn.Dropout(config.hidden_dropout_prob)
+  
+  
+  def init_ffn_moe(self, num_experts=8, k=2):
+        moe_layer = MoE(self.interm_dense.in_features, self.interm_dense.out_features, num_experts, k)
+        for expert in moe_layer.experts:
+            expert.linear.weight.data = self.interm_dense.weight.data.clone().detach()
+            expert.linear.bias.data = self.interm_dense.bias.data.clone().detach()
+        self.ffn = moe_layer
 
   def add_norm(self, input, output, dense_layer, dropout, ln_layer):
     """
@@ -124,7 +142,8 @@ class BertLayer(nn.Module):
     attn_value = self.self_attention(hidden_states, attention_mask)
     attn_norm = self.add_norm(hidden_states, attn_value, self.attention_dense, self.attention_dropout, self.attention_layer_norm)
 
-    out = self.interm_af(self.interm_dense(attn_norm))
+    out = self.ffn(attn_norm)
+    #out = self.interm_af(self.interm_dense(attn_norm))
     out_norm = self.add_norm(attn_norm, out, self.out_dense, self.out_dropout, self.out_layer_norm)
 
     return out_norm
@@ -161,13 +180,17 @@ class BertModel(BertPreTrainedModel):
 
     self.init_weights()
 
+    print(f'use_moe, {config.use_moe}')
+    if config.use_moe:
+      for layer in self.bert_layers:
+        layer.init_ffn_moe()
+     
     print(f'use_lora, {config.use_lora}')
     if config.use_lora:
       print(f'lora_rank, {config.lora_rank}')
       print(f'lora_svd_init, {config.lora_svd_init}')
       lora_layers = [name for name, m in self.named_modules() if isinstance(m, nn.Linear)]
       replace_with_lora_layers(self, lora_layers, rank=config.lora_rank, svd_init=config.lora_svd_init)
-
     
   def embed(self, input_ids):
     input_shape = input_ids.size()

@@ -13,15 +13,16 @@
             "console": "integratedTerminal",
             "args": [
                 "--fine-tune-mode",
-                "lora",
+                //"lora",
+                "full-model",
                 "--lr_bert",
                 "1e-5",
                 "--lr_class",
                 "1e-3",
-                "--lora_rank",
+                "--use_moe"
+                /*"--lora_rank",
                 "16",
-                "--lora_svd_init",
-                "True"
+                "--lora_svd_init",*/
             ],
         }
     ]
