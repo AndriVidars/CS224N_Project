@@ -288,7 +288,7 @@ def train(args):
     optimizer = AdamW([
     {'params': [param for name, param in model.named_parameters() if 'bert' in name], 'lr': args.lr_bert},
     {'params': [param for name, param in model.named_parameters() if 'bert' not in name], 'lr': args.lr_class},
-    ])
+    ], weight_decay=args.weight_decay)
 
 
     best_dev_acc = 0
@@ -380,6 +380,8 @@ def get_args():
     parser.add_argument("--lora_rank", type=int, help="rank of lora adapters",
                         default=8)
     parser.add_argument("--lora_svd_init", action='store_true')
+    parser.add_argument("--weight_decay", type=float, default=0.0)
+
 
     args = parser.parse_args()
     return args
@@ -423,7 +425,8 @@ if __name__ == "__main__":
         dev_out = dev_out_sst,
         test_out = test_out_sst,
         lora_rank=args.lora_rank,
-        lora_svd_init=args.lora_svd_init
+        lora_svd_init=args.lora_svd_init,
+        weight_decay=args.weight_decay
     )
 
     train(config)
@@ -447,7 +450,8 @@ if __name__ == "__main__":
         dev_out = dev_out_cdimdb,
         test_out = test_out_cfimdb,
         lora_rank=args.lora_rank,
-        lora_svd_init=args.lora_svd_init
+        lora_svd_init=args.lora_svd_init,
+        weight_decay=args.weight_decay
     )
 
     train(config)
