@@ -63,16 +63,31 @@ class MultitaskBERT(nn.Module):
     '''
     def __init__(self, config):
         super(MultitaskBERT, self).__init__()
-        self.bert = BertModel.from_pretrained('bert-base-uncased')
+        if config.fine_tune_mode == 'lora':
+            self.bert = BertModel.from_pretrained('bert-base-uncased',
+                                                  use_lora = True,
+                                                  lora_rank = config.lora_rank,
+                                                  lora_svd_init = config.lora_svd_init)
+        else:
+            self.bert = BertModel.from_pretrained('bert-base-uncased')
+
         # last-linear-layer mode does not require updating BERT paramters.
-        assert config.fine_tune_mode in ["last-linear-layer", "full-model"]
-        for param in self.bert.parameters():
-            if config.fine_tune_mode == 'last-linear-layer':
-                param.requires_grad = False
-            elif config.fine_tune_mode == 'full-model':
-                param.requires_grad = True
+        assert config.fine_tune_mode in ["last-linear-layer", "full-model", "lora"]
+        if config.fine_tune_mode == 'lora':
+            for name, param in self.bert.named_parameters():
+                if "lora" in name or ("bert" in name and 'bias' in name):
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+        else:
+            for param in self.bert.parameters():
+                if config.fine_tune_mode == 'last-linear-layer':
+                    param.requires_grad = False
+                elif config.fine_tune_mode == 'full-model':
+                    param.requires_grad = True
         # You will want to add layers here to perform the downstream tasks.
         ### TODO
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.sentiment_classifier = nn.Linear(BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES)
         self.paraphrase_classifier = nn.Linear(BERT_HIDDEN_SIZE * 2, 1)
         self.similarity_classifier = nn.Linear(BERT_HIDDEN_SIZE * 2, 1)
@@ -86,6 +101,7 @@ class MultitaskBERT(nn.Module):
         ### TODO
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
         cls_embedding = outputs['last_hidden_state'][:, 0, :]
+        cls_embedding = self.dropout(cls_embedding)
         return cls_embedding
 
 
@@ -147,77 +163,137 @@ def save_model(model, optimizer, args, config, filepath):
     torch.save(save_info, filepath)
     print(f"save the model to {filepath}")
 
-
 def train_multitask(args):
-    '''Train MultitaskBERT.
-
-    Currently only trains on SST dataset. The way you incorporate training examples
-    from other datasets into the training procedure is up to you. To begin, take a
-    look at test_multitask below to see how you can use the custom torch `Dataset`s
-    in datasets.py to load in examples from the Quora and SemEval datasets.
-    '''
+    '''Train MultitaskBERT on all three tasks simultaneously.'''
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
-    # Create the data and its corresponding datasets and dataloader.
-    sst_train_data, num_labels,para_train_data, sts_train_data = load_multitask_data(args.sst_train,args.para_train,args.sts_train, split ='train')
-    sst_dev_data, num_labels,para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev, split ='train')
 
+    # Load training and validation data for all tasks
+    sst_train_data, num_labels, para_train_data, sts_train_data = load_multitask_data(args.sst_train, args.para_train, args.sts_train, split='train')
+    sst_dev_data, num_labels, para_dev_data, sts_dev_data = load_multitask_data(args.sst_dev, args.para_dev, args.sts_dev, split='dev')
+
+    # Create the data and its corresponding datasets and dataloader
+    # SST
     sst_train_data = SentenceClassificationDataset(sst_train_data, args)
     sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
+    sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size, collate_fn=sst_train_data.collate_fn)
+    sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size, collate_fn=sst_dev_data.collate_fn)
 
-    sst_train_dataloader = DataLoader(sst_train_data, shuffle=True, batch_size=args.batch_size,
-                                      collate_fn=sst_train_data.collate_fn)
-    sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
-                                    collate_fn=sst_dev_data.collate_fn)
+    # paraphrase detection
+    para_train_data = SentencePairDataset(para_train_data, args)
+    para_dev_data = SentencePairDataset(para_dev_data, args)
+    para_train_dataloader = DataLoader(para_train_data, shuffle=True, batch_size=args.batch_size, collate_fn=para_train_data.collate_fn)
+    para_dev_dataloader = DataLoader(para_dev_data, shuffle=False, batch_size=args.batch_size, collate_fn=para_dev_data.collate_fn)
+
+    # STS
+    sts_train_data = SentencePairDataset(sts_train_data, args, isRegression=True)
+    sts_dev_data = SentencePairDataset(sts_dev_data, args, isRegression=True)
+    sts_train_dataloader = DataLoader(sts_train_data, shuffle=True, batch_size=args.batch_size, collate_fn=sts_train_data.collate_fn)
+    sts_dev_dataloader = DataLoader(sts_dev_data, shuffle=False, batch_size=args.batch_size, collate_fn=sts_dev_data.collate_fn)
 
     # Init model.
     config = {'hidden_dropout_prob': args.hidden_dropout_prob,
               'num_labels': num_labels,
-              'hidden_size': 768,
-              'data_dir': '.',
-              'fine_tune_mode': args.fine_tune_mode}
-
+              'hidden_size': BERT_HIDDEN_SIZE,
+              'fine_tune_mode': args.fine_tune_mode,
+              'lora_rank': args.lora_rank,
+              'lora_svd_init': args.lora_svd_init
+              }
+    
     config = SimpleNamespace(**config)
 
     model = MultitaskBERT(config)
-    model = model.to(device)
+    model.to(device)
+    print(f"training device, {device}\n")
 
-    lr = args.lr
-    optimizer = AdamW(model.parameters(), lr=lr)
-    best_dev_acc = 0
+    # Init optimizer
+    optimizer = AdamW(model.parameters(), lr=args.lr)
 
-    # Run for the specified number of epochs.
+    best_dev_acc = 0.0
+
+    # run for the specified number of epochs
     for epoch in range(args.epochs):
         model.train()
-        train_loss = 0
+        train_loss = 0.0
         num_batches = 0
-        for batch in tqdm(sst_train_dataloader, desc=f'train-{epoch}', disable=TQDM_DISABLE):
-            b_ids, b_mask, b_labels = (batch['token_ids'],
-                                       batch['attention_mask'], batch['labels'])
+        for sst_batch, para_batch, sts_batch in tqdm(zip(sst_train_dataloader, para_train_dataloader, sts_train_dataloader), 
+                                                     desc=f'train-{epoch}', disable=TQDM_DISABLE):
+            # SST task
+            sst_ids, sst_mask, sst_labels = sst_batch['token_ids'], sst_batch['attention_mask'],sst_batch['labels']
+            sst_ids = sst_ids.to(device)
+            sst_mask = sst_mask.to(device)
+            sst_labels = sst_labels.to(device)
 
-            b_ids = b_ids.to(device)
-            b_mask = b_mask.to(device)
-            b_labels = b_labels.to(device)
+            # paraphrase detection task
+            para_ids1, para_mask1, para_ids2, para_mask2, para_labels = (para_batch['token_ids_1'], 
+                                                                         para_batch['attention_mask_1'],
+                                                                          para_batch['token_ids_2'], 
+                                                                          para_batch['attention_mask_2'], 
+                                                                          para_batch['labels'])
+            para_ids1 = para_ids1.to(device)
+            para_mask1 = para_mask1.to(device)
+            para_ids2 = para_ids2.to(device)
+            para_mask2 = para_mask2.to(device)
+            para_labels = para_labels.to(device).float()
+
+            # STS task
+            sts_ids1, sts_mask1, sts_ids2, sts_mask2, sts_scores = (sts_batch['token_ids_1'], sts_batch['attention_mask_1'],
+                                                                    sts_batch['token_ids_2'], sts_batch['attention_mask_2'], 
+                                                                    sts_batch['labels'])
+            sts_ids1 = sts_ids1.to(device)
+            sts_mask1 = sts_mask1.to(device)
+            sts_ids2 = sts_ids2.to(device)
+            sts_mask2 = sts_mask2.to(device)
+            sts_scores = sts_scores.to(device).float()
 
             optimizer.zero_grad()
-            logits = model.predict_sentiment(b_ids, b_mask)
-            loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
 
+            # Total loss function as the sum of the loss for the three tasks
+            # SST
+            sst_logits = model.predict_sentiment(sst_ids, sst_mask)
+            sst_loss = F.cross_entropy(sst_logits, sst_labels.view(-1), reduction='sum') / args.batch_size
+            # paraphrase detection
+            para_logits = model.predict_paraphrase(para_ids1, para_mask1, para_ids2, para_mask2)
+            para_loss = F.binary_cross_entropy_with_logits(para_logits.view(-1), para_labels.view(-1), reduction='sum') / args.batch_size
+            # STS
+            sts_logits = model.predict_similarity(sts_ids1, sts_mask1, sts_ids2, sts_mask2)
+            sts_loss = F.mse_loss(sts_logits.view(-1), sts_scores.view(-1), reduction='sum') / args.batch_size
+            # Total loss
+            # Should we use weighted sum? 
+            loss = sst_loss + para_loss + sts_loss
             loss.backward()
             optimizer.step()
 
             train_loss += loss.item()
             num_batches += 1
 
-        train_loss = train_loss / (num_batches)
+        train_loss = train_loss / num_batches
 
-        train_acc, train_f1, *_ = model_eval_sst(sst_train_dataloader, model, device)
-        dev_acc, dev_f1, *_ = model_eval_sst(sst_dev_dataloader, model, device)
+        # Evaluate on SST dev sets using the multitask model (need to evaluate on the other datasets later)
+        (sst_train_acc,_, _,para_train_acc, _,_,sts_train_corr, _,_) = model_eval_multitask(sst_train_dataloader, 
+                                                                para_train_dataloader,
+                                                                sts_train_dataloader,
+                                                                model, device)
+
+        (sst_dev_acc,_,_,para_dev_acc, _,_,sts_dev_corr, _,_) = model_eval_multitask(sst_dev_dataloader, 
+                                                                para_dev_dataloader, 
+                                                                sts_dev_dataloader, 
+                                                                model, device)
+        
+        # accuracy is average of accuracy the three tasks
+        # other options: check that the accuracy of each task improves, 
+        # check if the accuracy of at least one task improves
+
+        train_acc = (sst_train_acc + para_train_acc + sts_train_corr) / 3
+        dev_acc = (sst_dev_acc + para_dev_acc + sts_dev_corr) / 3
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
             save_model(model, optimizer, args, config, args.filepath)
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+        print(f'Sentiment classification train accuracy: {sst_train_acc:.3f}')
+        print(f'Paraphrase detection train accuracy: {para_train_acc:.3f}')
+        print(f'Semantic Textual Similarity train correlation: {sts_train_corr:.3f}')
 
 
 def test_multitask(args):
@@ -307,7 +383,6 @@ def test_multitask(args):
             for p, s in zip(test_sts_sent_ids, test_sts_y_pred):
                 f.write(f"{p} , {s} \n")
 
-
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sst_train", type=str, default="data/ids-sst-train.csv")
@@ -342,13 +417,28 @@ def get_args():
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
     parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
 
+    parser.add_argument("--lr_bert", type=float, help="learning rate for bert layers, full or lora",
+                        default=1e-3)
+    parser.add_argument("--lr_class", type=float, help="learning rate for classification layers",
+                        default=1e-3)
+    parser.add_argument("--lora_rank", type=int, help="rank of lora adapters",
+                        default=8)
+    parser.add_argument("--lora_svd_init", action='store_true')
+    parser.add_argument("--weight_decay", type=float, default=0.0)
+
     args = parser.parse_args()
     return args
 
 
 if __name__ == "__main__":
     args = get_args()
-    args.filepath = f'{args.fine_tune_mode}-{args.epochs}-{args.lr}-multitask.pt' # Save path.
+
+    if args.fine_tune_mode == 'lora':
+        lora_details = f'_{args.lora_rank}_{args.lora_svd_init}'
+    else:
+        lora_details = ''
+
+    args.filepath = f'{args.fine_tune_mode}{lora_details}-{args.epochs}-{args.lr}-multitask.pt' # Save path.
     seed_everything(args.seed)  # Fix the seed for reproducibility.
     print("=== Training Multitask BERT ===")
     train_multitask(args)
