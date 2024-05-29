@@ -16,6 +16,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 import fnmatch
+from collections import Counter
+import random
 
 __version__ = "4.0.0"
 _torch_version = importlib_metadata.version("torch")
@@ -41,6 +43,14 @@ def is_torch_available():
 
 def is_tf_available():
   return False
+
+def most_common_item(lst):
+    if not lst:
+        return None
+    counter = Counter(lst)
+    max_count = max(counter.values())
+    most_common_items = [item for item, count in counter.items() if count == max_count]
+    return random.choice(most_common_items)
 
 
 def is_remote_url(url_or_filename):
