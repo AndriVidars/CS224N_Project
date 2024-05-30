@@ -227,12 +227,13 @@ def train_multitask(args):
     ], weight_decay=args.weight_decay)
 
     best_dev_acc = 0.0
-
+    
     # run for the specified number of epochs
     for epoch in range(args.epochs):
         model.train()
         train_loss = 0.0
         num_batches = 0
+        miss_iter = 0 # number of times the backward fails(due to memory)
         sst_train_dataloader_iter = iter(sst_train_dataloader)
         sts_train_dataloader_iter = iter(sts_train_dataloader)
         for i, para_batch, in tqdm(enumerate(para_train_dataloader), desc=f'train-{epoch}', disable=TQDM_DISABLE):
@@ -249,11 +250,16 @@ def train_multitask(args):
             para_mask2 = para_mask2.to(device)
             para_labels = para_labels.to(device).float()
             
-            total_loss = 0
             optimizer.zero_grad()
+            total_loss = 0
             para_logits = model.predict_paraphrase(para_ids1, para_mask1, para_ids2, para_mask2)
             para_loss = F.binary_cross_entropy_with_logits(para_logits.view(-1), para_labels.view(-1), reduction='sum') / para_batch_size
             total_loss += para_loss
+            if args.backward_sep:
+                para_loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+            
             del para_ids1, para_mask1, para_ids2, para_mask2, para_labels, para_logits, para_loss
 
             if (i + 1) % para_sst_ratio == 0 or (i + 1) == num_batches_para:
@@ -267,6 +273,11 @@ def train_multitask(args):
                 sst_logits = model.predict_sentiment(sst_ids, sst_mask)
                 sst_loss = F.cross_entropy(sst_logits, sst_labels.view(-1), reduction='sum') / sst_batch_size
                 total_loss += sst_loss
+                if args.backward_sep:
+                    sst_loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+                
                 del sst_ids, sst_mask, sst_labels, sst_logits, sst_loss
 
             if (i + 1) % para_sts_ratio == 0 or (i + 1) == num_batches_para:
@@ -284,18 +295,29 @@ def train_multitask(args):
                 sts_logits = model.predict_similarity(sts_ids1, sts_mask1, sts_ids2, sts_mask2)
                 sts_loss = F.mse_loss(sts_logits.view(-1), sts_scores.view(-1), reduction='sum') / sts_batch_size
                 total_loss += sts_loss
+                if args.backward_sep:
+                    sts_loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+                
                 del sts_ids1, sts_mask1, sts_ids2, sts_mask2, sts_scores, sts_logits, sts_loss
                 
             # Should we use weighted sum? I think this should suffice
-            total_loss.backward()
-            optimizer.step()
+            if not args.backward_sep:
+                try:
+                    total_loss.backward()
+                    optimizer.step()
+                    train_loss += total_loss.item()
+                    num_batches += 1
+                except:
+                    miss_iter += 1
+                    torch.cuda.empty_cache()
+            
+            else:
+                train_loss += total_loss.item()
+                num_batches += 1
 
-            # free up memory, was running into problems before
-            torch.cuda.empty_cache()
-
-            train_loss += total_loss.item()
-            num_batches += 1
-
+        print(f'Number of missed iters in epoch, {miss_iter}')
         train_loss = train_loss / num_batches
 
         # Evaluate on SST dev sets using the multitask model (need to evaluate on the other datasets later)
@@ -321,9 +343,15 @@ def train_multitask(args):
             save_model(model, optimizer, args, config, args.filepath)
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+        
         print(f'Sentiment classification train accuracy: {sst_train_acc:.3f}')
+        print(f'Sentiment classification dev accuracy: {sst_dev_acc:.3f}')
+
         print(f'Paraphrase detection train accuracy: {para_train_acc:.3f}')
+        print(f'Paraphrase detection dev accuracy: {para_dev_acc:.3f}')
+
         print(f'Semantic Textual Similarity train correlation: {sts_train_corr:.3f}')
+        print(f'Semantic Textual Similarity dev correlation: {sts_dev_corr:.3f}')
 
 
 def test_multitask(args):
@@ -457,6 +485,7 @@ def get_args():
                         default=8)
     parser.add_argument("--lora_svd_init", action='store_true')
     parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument("--backward_sep", action='store_true') # do backprop separately for each task
 
     args = parser.parse_args()
     return args
