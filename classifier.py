@@ -13,9 +13,12 @@ from bert import BertModel
 #from optimizer import AdamW
 from transformers import AdamW
 from tqdm import tqdm
+import os
+from utils import most_common_item, add_relative_weight_noise
 
-
-TQDM_DISABLE=False
+TQDM_DISABLE=True
+BAGG_SAVE_MODELS = False
+BAGG_ADD_NOISE = False
 
 
 # Fix the random seed.
@@ -184,7 +187,7 @@ def load_data(filename, flag='train'):
 
 # Evaluate the model on dev examples.
 def model_eval(dataloader, model, device):
-    model.eval() # Switch to eval model, will turn off randomness like dropout.
+    model.eval()
     y_true = []
     y_pred = []
     sents = []
@@ -210,8 +213,7 @@ def model_eval(dataloader, model, device):
     acc = accuracy_score(y_true, y_pred)
 
     return acc, f1, y_pred, y_true, sents, sent_ids
-
-
+    
 # Evaluate the model on test examples.
 def model_test_eval(dataloader, model, device):
     model.eval() # Switch to eval model, will turn off randomness like dropout.
@@ -256,7 +258,7 @@ def train(args):
     # Create the data and its corresponding datasets and dataloader.
     train_data, num_labels = load_data(args.train, 'train')
     dev_data = load_data(args.dev, 'valid')
-
+    
     train_dataset = SentimentDataset(train_data, args)
     dev_dataset = SentimentDataset(dev_data, args)
 
@@ -292,7 +294,6 @@ def train(args):
 
 
     best_dev_acc = 0
-
     # Run for the specified number of epochs.
     for epoch in range(args.epochs):
         model.train()
@@ -327,7 +328,131 @@ def train(args):
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
+def train_bagg(args):
+    device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
+    print(f'training device, {device}\n')
 
+    train_data, num_labels = load_data(args.train, 'train')
+    dev_data = load_data(args.dev, 'valid')
+    test_data = load_data(args.test, 'test')
+    dev_dataset = SentimentDataset(dev_data, args)
+    dev_dataloader = DataLoader(dev_dataset, shuffle=False, batch_size=args.batch_size,
+                                collate_fn=dev_dataset.collate_fn)
+    test_dataset = SentimentTestDataset(test_data, args)
+    test_dataloader = DataLoader(test_dataset, shuffle=False, batch_size=args.batch_size,
+                                collate_fn=test_dataset.collate_fn)
+    
+    dev_labels = {x[2]: x[1] for x in dev_data}
+    
+    config = {'hidden_dropout_prob': args.hidden_dropout_prob,
+              'num_labels': num_labels,
+              'hidden_size': 768,
+              'data_dir': '.',
+              'fine_tune_mode': args.fine_tune_mode,
+              'lora_rank': args.lora_rank,
+              'lora_svd_init': args.lora_svd_init
+              }
+
+    config = SimpleNamespace(**config)
+    
+    eval_preds = [] # predictions of each model in ensamble on dev set
+    test_preds = []
+    filepath = args.filepath
+    model_filepaths = []
+    for i in tqdm(range(args.n_models)):
+        train_data_model = random.choices(train_data, k=len(train_data)) # bootstrap
+        train_dataset = SentimentDataset(train_data_model, args)
+        train_dataloader = DataLoader(train_dataset, shuffle=True, batch_size=args.batch_size,
+                                  collate_fn=train_dataset.collate_fn)
+
+        model = BertSentimentClassifier(config) ## todo, maybe add some perturbation into model here
+        if BAGG_ADD_NOISE:
+            model = add_relative_weight_noise(model, noise_std=0.1) # the std value is arbitrary, not tuned
+        
+        model = model.to(device)
+        optimizer = AdamW([
+            {'params': [param for name, param in model.named_parameters() if 'bert' in name], 'lr': args.lr_bert},
+            {'params': [param for name, param in model.named_parameters() if 'bert' not in name], 'lr': args.lr_class},
+            ], weight_decay=args.weight_decay)
+        
+        
+        if i == 0:
+            n_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"Number of trainable parameters, {format(n_trainable_params, ',')}")
+        
+        filepath_model = f'model_{i}_{filepath}'
+        model_filepaths.append(filepath_model)
+        best_dev_acc = 0
+        for epoch in range(args.epochs):
+            model.train()
+            train_loss = 0
+            num_batches = 0
+            for batch in train_dataloader:
+                b_ids, b_mask, b_labels = (batch['token_ids'],
+                                           batch['attention_mask'], batch['labels'])
+
+                b_ids = b_ids.to(device)
+                b_mask = b_mask.to(device)
+                b_labels = b_labels.to(device)
+
+                optimizer.zero_grad()
+                logits = model(b_ids, b_mask)
+                loss = F.cross_entropy(logits, b_labels.view(-1), reduction='sum') / args.batch_size
+
+                loss.backward()
+                optimizer.step()
+
+                train_loss += loss.item()
+                num_batches += 1
+
+            train_loss = train_loss / (num_batches)
+
+            #train_acc, train_f1, *_  = model_eval(train_dataloader, model, device)
+            dev_acc, dev_f1, *_ = model_eval(dev_dataloader, model, device)
+
+            if dev_acc > best_dev_acc:
+                best_dev_acc = dev_acc
+                save_model(model, optimizer, args, config, filepath_model)
+        
+        # load best model and predict
+        eval_pred = predict(dev_dataloader, filepath_model, device)
+        eval_preds.append(eval_pred)
+        test_pred = predict(test_dataloader, filepath_model, device)
+        test_preds.append(test_pred)
+        if not BAGG_SAVE_MODELS:
+            os.remove(filepath_model)
+
+    print('... Writing prediction files ...')
+    eval_preds_out = pred_bagg(eval_preds, dev_labels, f"predictions/acc_{filepath_model.replace('pt', 'txt')}")
+    test_preds_out = pred_bagg(test_preds)
+    
+    write_pred_file(eval_preds_out, args.dev_out)
+    write_pred_file(test_preds_out, args.test_out)
+    return
+
+def write_pred_file(preds, filepath):
+    with open(filepath, "w+") as f:
+            f.write(f"id \t Predicted_Sentiment \n")
+            for p, s in preds.items():
+                f.write(f"{p} , {s} \n")
+
+
+def pred_bagg(preds, labels=None, acc_file=None):
+    # majority vote prediction
+    preds_out = {}
+    sent_ids = [k for k in preds[0].keys()]
+    for sent_id in sent_ids:
+        preds_ = [pred[sent_id] for pred in preds]
+        preds_out[sent_id] = most_common_item(preds_) # majority vote, if tied most freq, then random among most freq
+    
+    if labels:
+        accuracy = sum([1 if preds_out[sent_id] == labels[sent_id] else 0 for sent_id in sent_ids]) / len(sent_ids)
+        print(f'Accuracy on dev set, {accuracy}')
+        with open(acc_file, 'w') as file:
+            file.write(f'{accuracy}\n')
+
+    return preds_out
+        
 def test(args):
     with torch.no_grad():
         device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
@@ -361,6 +486,37 @@ def test(args):
             for p, s  in zip(test_sent_ids,test_pred ):
                 f.write(f"{p} , {s} \n")
 
+def predict(dataloader, filepath_model, device):
+    with torch.no_grad():
+        saved = torch.load(filepath_model)
+        config = saved['model_config']
+        model = BertSentimentClassifier(config)
+        model.load_state_dict(saved['model'])
+        model = model.to(device)
+        pred_dict = model_pred(dataloader, model, device)
+    
+    return pred_dict
+
+def model_pred(dataloader, model, device):
+    # collect predictions for one model in bagging ensamble
+    model.eval()
+    sent_ids = []
+    y_pred = []
+    for _, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
+        b_ids, b_mask, b_sent_ids = batch['token_ids'],batch['attention_mask'], batch['sent_ids']
+
+        b_ids = b_ids.to(device)
+        b_mask = b_mask.to(device)
+
+        logits = model(b_ids, b_mask)
+        logits = logits.detach().cpu().numpy()
+        preds = np.argmax(logits, axis=1).flatten()
+        y_pred.extend(preds)
+        sent_ids.extend(b_sent_ids)
+    
+    # return dict sent_id -> pred
+    return {sent_id: y_pred[i] for i, sent_id in enumerate(sent_ids)}
+
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -381,7 +537,8 @@ def get_args():
                         default=8)
     parser.add_argument("--lora_svd_init", action='store_true')
     parser.add_argument("--weight_decay", type=float, default=0.0)
-
+    parser.add_argument("--use_bagging", action='store_true')
+    parser.add_argument('--n_models_bagging', type=int, help='Number of models to use in bagging ensamble', default=10)
 
     args = parser.parse_args()
     return args
@@ -389,9 +546,7 @@ def get_args():
 
 if __name__ == "__main__":
     args = get_args()
-    seed_everything(args.seed)
-
-    print('Training Sentiment Classifier on SST...')
+    #seed_everything(args.seed)
 
     base_filepath_sst = f'classifier_{args.fine_tune_mode}'
     base_dev_out = f'predictions/{args.fine_tune_mode}'
@@ -401,16 +556,21 @@ if __name__ == "__main__":
         lora_details = f'_{args.lora_rank}_{args.lora_svd_init}'
     else:
         lora_details = ''
+    
+    if args.use_bagging:
+        bagg_details = f'_bagg_{args.n_models_bagging}'
+    else:
+        bagg_details = ''
 
-    filepath_sst = f'sst-{base_filepath_sst}{lora_details}_{args.lr_bert}_{args.lr_class}.pt'
-    dev_out_sst = f'{base_dev_out}{lora_details}_{args.lr_bert}_{args.lr_class}-sst-dev-out.csv'
-    test_out_sst = f'{base_test_out}{lora_details}_{args.lr_bert}_{args.lr_class}-sst-test-out.csv'
+    filepath_sst = f'sst-{base_filepath_sst}{lora_details}_{args.lr_bert}_{args.lr_class}{bagg_details}.pt'
+    dev_out_sst = f'{base_dev_out}{lora_details}_{args.lr_bert}_{args.lr_class}{bagg_details}-sst-dev-out.csv'
+    test_out_sst = f'{base_test_out}{lora_details}_{args.lr_bert}_{args.lr_class}{bagg_details}-sst-test-out.csv'
 
-    filepath_cfimdb = f'cfimdb-{base_filepath_sst}{lora_details}_{args.lr_bert}_{args.lr_class}.pt'
-    dev_out_cdimdb = f'{base_dev_out}{lora_details}_{args.lr_bert}_{args.lr_class}-cfimdb-dev-out.csv'
-    test_out_cfimdb = f'{base_test_out}{lora_details}_{args.lr_bert}_{args.lr_class}-cdimdb-test-out.csv'
+    filepath_cfimdb = f'cfimdb-{base_filepath_sst}{lora_details}_{args.lr_bert}_{args.lr_class}{bagg_details}.pt'
+    dev_out_cdimdb = f'{base_dev_out}{lora_details}_{args.lr_bert}_{args.lr_class}{bagg_details}-cfimdb-dev-out.csv'
+    test_out_cfimdb = f'{base_test_out}{lora_details}_{args.lr_bert}_{args.lr_class}{bagg_details}-cdimdb-test-out.csv'
 
-    config = SimpleNamespace(
+    config_sst = SimpleNamespace(
         filepath=filepath_sst,
         lr_bert=args.lr_bert,
         lr_class=args.lr_class,
@@ -426,16 +586,22 @@ if __name__ == "__main__":
         test_out = test_out_sst,
         lora_rank=args.lora_rank,
         lora_svd_init=args.lora_svd_init,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        n_models = args.n_models_bagging
     )
 
-    train(config)
-    
-    print('Evaluating on SST...')
-    test(config)
+    if args.use_bagging:
+        print('Training Bagging Ensamble Classifier on SST...')
+        train_bagg(config_sst)
+        
+    else:
+        print('Training Sentiment Classifier on SST...')
+        train(config_sst)
+        print('Evaluating on SST...')
+        test(config_sst)
 
     print('Training Sentiment Classifier on cfimdb...')
-    config = SimpleNamespace(
+    config_cfimbd = SimpleNamespace(
         filepath=filepath_cfimdb,
         lr_bert=args.lr_bert,
         lr_class=args.lr_class,
@@ -451,10 +617,15 @@ if __name__ == "__main__":
         test_out = test_out_cfimdb,
         lora_rank=args.lora_rank,
         lora_svd_init=args.lora_svd_init,
-        weight_decay=args.weight_decay
+        weight_decay=args.weight_decay,
+        n_models = args.n_models_bagging
     )
 
-    train(config)
-
-    print('Evaluating on cfimdb...')
-    test(config)
+    if args.use_bagging:
+        print('Training Bagging Ensamble Classifier on cfimbd...')
+        train_bagg(config_cfimbd)
+    else:
+        print('Training Sentiment Classifier on cfimdb...')
+        train(config_cfimbd)
+        print('Evaluating on cfimdb...')
+        test(config_cfimbd)

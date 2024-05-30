@@ -12,7 +12,6 @@ from sklearn.metrics import f1_score, accuracy_score
 from tqdm import tqdm
 import numpy as np
 
-
 TQDM_DISABLE = False
 
 
@@ -126,9 +125,9 @@ def model_eval_multitask(sentiment_dataloader,
         pearson_mat = np.corrcoef(sts_y_pred,sts_y_true)
         sts_corr = pearson_mat[1][0]
 
-        print(f'Sentiment classification accuracy: {sentiment_accuracy:.3f}')
-        print(f'Paraphrase detection accuracy: {paraphrase_accuracy:.3f}')
-        print(f'Semantic Textual Similarity correlation: {sts_corr:.3f}')
+        #print(f'Sentiment classification accuracy: {sentiment_accuracy:.3f}')
+        #print(f'Paraphrase detection accuracy: {paraphrase_accuracy:.3f}')
+        #print(f'Semantic Textual Similarity correlation: {sts_corr:.3f}')
 
         return (sentiment_accuracy,sst_y_pred, sst_sent_ids,
                 paraphrase_accuracy, para_y_pred, para_sent_ids,
