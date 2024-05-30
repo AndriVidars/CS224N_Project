@@ -14,11 +14,11 @@ from bert import BertModel
 from transformers import AdamW
 from tqdm import tqdm
 import os
-from utils import most_common_item
-import pickle
+from utils import most_common_item, add_relative_weight_noise
 
 TQDM_DISABLE=True
 BAGG_SAVE_MODELS = False
+BAGG_ADD_NOISE = False
 
 
 # Fix the random seed.
@@ -366,11 +366,19 @@ def train_bagg(args):
                                   collate_fn=train_dataset.collate_fn)
 
         model = BertSentimentClassifier(config) ## todo, maybe add some perturbation into model here
+        if BAGG_ADD_NOISE:
+            model = add_relative_weight_noise(model, noise_std=0.1) # the std value is arbitrary, not tuned
+        
         model = model.to(device)
         optimizer = AdamW([
             {'params': [param for name, param in model.named_parameters() if 'bert' in name], 'lr': args.lr_bert},
             {'params': [param for name, param in model.named_parameters() if 'bert' not in name], 'lr': args.lr_class},
             ], weight_decay=args.weight_decay)
+        
+        
+        if i == 0:
+            n_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"Number of trainable parameters, {format(n_trainable_params, ',')}")
         
         filepath_model = f'model_{i}_{filepath}'
         model_filepaths.append(filepath_model)
@@ -570,7 +578,7 @@ if __name__ == "__main__":
         epochs=args.epochs,
         batch_size=args.batch_size,
         hidden_dropout_prob=args.hidden_dropout_prob,
-        train='data/ids-sst-train-short.csv', # modify to use augmented data
+        train='data/ids-sst-train.csv', # modify to use augmented data
         dev='data/ids-sst-dev.csv',
         test='data/ids-sst-test-student.csv',
         fine_tune_mode=args.fine_tune_mode,

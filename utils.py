@@ -52,6 +52,13 @@ def most_common_item(lst):
     most_common_items = [item for item, count in counter.items() if count == max_count]
     return random.choice(most_common_items)
 
+def add_relative_weight_noise(model, noise_std=0.01):
+    noisy_model = copy.deepcopy(model)
+    for param in noisy_model.parameters():
+        noise = torch.randn_like(param) * noise_std * param.data.abs()
+        param.data.add_(noise)
+    return noisy_model
+
 
 def is_remote_url(url_or_filename):
   parsed = urlparse(url_or_filename)
