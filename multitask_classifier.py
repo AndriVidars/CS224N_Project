@@ -252,13 +252,19 @@ def train_multitask(args):
             
             optimizer.zero_grad()
             total_loss = 0
-            para_logits = model.predict_paraphrase(para_ids1, para_mask1, para_ids2, para_mask2)
-            para_loss = F.binary_cross_entropy_with_logits(para_logits.view(-1), para_labels.view(-1), reduction='sum') / para_batch_size
-            total_loss += para_loss
-            if args.backward_sep:
-                para_loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
+            all_miss = True # backward on all tasks fails (due to memory constraints)
+            
+            try:
+                para_logits = model.predict_paraphrase(para_ids1, para_mask1, para_ids2, para_mask2)
+                para_loss = F.binary_cross_entropy_with_logits(para_logits.view(-1), para_labels.view(-1), reduction='sum') / para_batch_size
+                total_loss += para_loss
+                if args.backward_sep:
+                    para_loss.backward()
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    all_miss = False
+            except:
+                torch.cuda.empty_cache()
             
             del para_ids1, para_mask1, para_ids2, para_mask2, para_labels, para_logits, para_loss
 
@@ -270,13 +276,17 @@ def train_multitask(args):
                 sst_ids = sst_ids.to(device)
                 sst_mask = sst_mask.to(device)
                 sst_labels = sst_labels.to(device)
-                sst_logits = model.predict_sentiment(sst_ids, sst_mask)
-                sst_loss = F.cross_entropy(sst_logits, sst_labels.view(-1), reduction='sum') / sst_batch_size
-                total_loss += sst_loss
-                if args.backward_sep:
-                    sst_loss.backward()
-                    optimizer.step()
-                    optimizer.zero_grad()
+                try:
+                    sst_logits = model.predict_sentiment(sst_ids, sst_mask)
+                    sst_loss = F.cross_entropy(sst_logits, sst_labels.view(-1), reduction='sum') / sst_batch_size
+                    total_loss += sst_loss
+                    if args.backward_sep:
+                        sst_loss.backward()
+                        optimizer.step()
+                        optimizer.zero_grad()
+                        all_miss = False
+                except:
+                    torch.cuda.empty_cache()
                 
                 del sst_ids, sst_mask, sst_labels, sst_logits, sst_loss
 
@@ -292,18 +302,22 @@ def train_multitask(args):
                 sts_ids2 = sts_ids2.to(device)
                 sts_mask2 = sts_mask2.to(device)
                 sts_scores = sts_scores.to(device).float()
-                sts_logits = model.predict_similarity(sts_ids1, sts_mask1, sts_ids2, sts_mask2)
-                sts_loss = F.mse_loss(sts_logits.view(-1), sts_scores.view(-1), reduction='sum') / sts_batch_size
-                total_loss += sts_loss
-                if args.backward_sep:
-                    sts_loss.backward()
-                    optimizer.step()
-                    optimizer.zero_grad()
+                try:
+                    sts_logits = model.predict_similarity(sts_ids1, sts_mask1, sts_ids2, sts_mask2)
+                    sts_loss = F.mse_loss(sts_logits.view(-1), sts_scores.view(-1), reduction='sum') / sts_batch_size
+                    total_loss += sts_loss
+                    if args.backward_sep:
+                        sts_loss.backward()
+                        optimizer.step()
+                        optimizer.zero_grad()
+                        all_miss = False
+                except:
+                    torch.cuda.empty_cache()
                 
                 del sts_ids1, sts_mask1, sts_ids2, sts_mask2, sts_scores, sts_logits, sts_loss
                 
             # Should we use weighted sum? I think this should suffice
-            if not args.backward_sep:
+            if not args.backward_sep and total_loss != 0:
                 try:
                     total_loss.backward()
                     optimizer.step()
@@ -314,8 +328,11 @@ def train_multitask(args):
                     torch.cuda.empty_cache()
             
             else:
-                train_loss += total_loss.item()
-                num_batches += 1
+                if all_miss:
+                    miss_iter += 1
+                else:
+                    train_loss += total_loss.item()
+                    num_batches += 1
 
         print(f'Number of missed iters in epoch, {miss_iter}')
         train_loss = train_loss / num_batches
