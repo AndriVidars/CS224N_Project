@@ -266,8 +266,6 @@ def train_multitask(args):
             except:
                 torch.cuda.empty_cache()
             
-            del para_ids1, para_mask1, para_ids2, para_mask2, para_labels, para_logits, para_loss
-
             if (i + 1) % para_sst_ratio == 0 or (i + 1) == num_batches_para:
                 # SST task
                 sst_batch = next(sst_train_dataloader_iter)
@@ -288,7 +286,6 @@ def train_multitask(args):
                 except:
                     torch.cuda.empty_cache()
                 
-                del sst_ids, sst_mask, sst_labels, sst_logits, sst_loss
 
             if (i + 1) % para_sts_ratio == 0 or (i + 1) == num_batches_para:
                 # STS task
@@ -313,9 +310,7 @@ def train_multitask(args):
                         all_miss = False
                 except:
                     torch.cuda.empty_cache()
-                
-                del sts_ids1, sts_mask1, sts_ids2, sts_mask2, sts_scores, sts_logits, sts_loss
-                
+                        
             # Should we use weighted sum? I think this should suffice
             if not args.backward_sep and total_loss != 0:
                 try:
