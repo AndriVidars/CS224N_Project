@@ -491,13 +491,13 @@ def get_args():
     parser.add_argument("--sts_test_out", type=str, default="predictions/sts-test-output-multi")
     
     # different batch sizes for each task
-    parser.add_argument("--batch_size_sst", type=int, default=32) # dont know the memory cap
-    parser.add_argument("--batch_size_para", type=int, default=64)
-    parser.add_argument("--batch_size_sts", type=int, default=32)
+    parser.add_argument("--batch_size_sst", type=int, default=8) # dont know the memory cap
+    parser.add_argument("--batch_size_para", type=int, default=16)
+    parser.add_argument("--batch_size_sts", type=int, default=8)
     parser.add_argument("--train_ratio_sst", type=float, default=1.0)
     parser.add_argument("--train_ratio_para", type=float, default=0.25) # by default not train on all quora data
     parser.add_argument("--train_ratio_sts", type=float, default=1.0)
-    parser.add_argument("--hidden_dropout_prob", type=float, default=0.3)
+    parser.add_argument("--hidden_dropout_prob", type=float, default=0.5)
 
     parser.add_argument("--lr_bert", type=float, help="learning rate for bert layers, full or lora",
                         default=1e-5)
