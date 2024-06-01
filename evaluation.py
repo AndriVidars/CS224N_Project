@@ -12,7 +12,7 @@ from sklearn.metrics import f1_score, accuracy_score
 from tqdm import tqdm
 import numpy as np
 
-TQDM_DISABLE = False
+TQDM_DISABLE = True
 
 
 # Evaluate multitask model on SST only.
@@ -44,6 +44,24 @@ def model_eval_sst(dataloader, model, device):
 
     return acc, f1, y_pred, y_true, sents, sent_ids
 
+def model_eval_test_sst(dataloader, model, device):
+    model.eval()  # Switch to eval model, will turn off randomness like dropout.
+
+    with torch.no_grad():
+       # Evaluate sentiment classification.
+       sst_y_pred = []
+       sst_sent_ids = []
+       for step, batch in enumerate(tqdm(dataloader, desc=f'eval', disable=TQDM_DISABLE)):
+           b_ids, b_mask, b_sent_ids = batch['token_ids'], batch['attention_mask'],  batch['sent_ids']
+           b_ids = b_ids.to(device)
+           b_mask = b_mask.to(device)
+           logits = model.predict_sentiment(b_ids, b_mask)
+           y_hat = logits.argmax(dim=-1).flatten().cpu().numpy()
+           sst_y_pred.extend(y_hat)
+           sst_sent_ids.extend(b_sent_ids)
+    
+    return sst_y_pred, sst_sent_ids
+    
 
 # Evaluate multitask model on dev sets.
 def model_eval_multitask(sentiment_dataloader,

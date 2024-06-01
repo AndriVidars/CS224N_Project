@@ -115,7 +115,6 @@ class MultitaskBERT(nn.Module):
         (0 - negative, 1- somewhat negative, 2- neutral, 3- somewhat positive, 4- positive)
         Thus, your output should contain 5 logits for each sentence.
         '''
-        ### TODO
         cls_embedding = self.forward(input_ids, attention_mask)
         logits = self.sentiment_classifier(cls_embedding)
         return logits
@@ -150,6 +149,13 @@ class MultitaskBERT(nn.Module):
         logits = self.similarity_classifier(cls_embedding)
         return logits
 
+def save_checkpoint(bert, classifier, checkpoint_path):
+    save_info = {
+        'bert': bert.cpu().state_dict(),
+        'classifier': classifier.cpu().state_dict()
+    }
+    torch.save(save_info, checkpoint_path)
+    print(f"save the model checkpoint to {checkpoint_path}")   
 
 def save_model(model, optimizer, args, config, filepath):
     save_info = {
@@ -266,8 +272,6 @@ def train_multitask(args):
             except:
                 torch.cuda.empty_cache()
             
-            del para_ids1, para_mask1, para_ids2, para_mask2, para_labels, para_logits, para_loss
-
             if (i + 1) % para_sst_ratio == 0 or (i + 1) == num_batches_para:
                 # SST task
                 sst_batch = next(sst_train_dataloader_iter)
@@ -288,7 +292,6 @@ def train_multitask(args):
                 except:
                     torch.cuda.empty_cache()
                 
-                del sst_ids, sst_mask, sst_labels, sst_logits, sst_loss
 
             if (i + 1) % para_sts_ratio == 0 or (i + 1) == num_batches_para:
                 # STS task
@@ -313,9 +316,7 @@ def train_multitask(args):
                         all_miss = False
                 except:
                     torch.cuda.empty_cache()
-                
-                del sts_ids1, sts_mask1, sts_ids2, sts_mask2, sts_scores, sts_logits, sts_loss
-                
+                        
             # Should we use weighted sum? I think this should suffice
             if not args.backward_sep and total_loss != 0:
                 try:
@@ -369,6 +370,10 @@ def train_multitask(args):
 
         print(f'Semantic Textual Similarity train correlation: {sts_train_corr:.3f}')
         print(f'Semantic Textual Similarity dev correlation: {sts_dev_corr:.3f}')
+    
+    save_checkpoint(model.bert, model.sentiment_classifier, f'sst_{args.filepath}')
+    save_checkpoint(model.bert, model.paraphrase_classifier, f'para_{args.filepath}')
+    save_checkpoint(model.bert, model.similarity_classifier, f'sts_{args.filepath}')
 
 
 def test_multitask(args):
