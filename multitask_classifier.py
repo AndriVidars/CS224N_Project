@@ -115,7 +115,6 @@ class MultitaskBERT(nn.Module):
         (0 - negative, 1- somewhat negative, 2- neutral, 3- somewhat positive, 4- positive)
         Thus, your output should contain 5 logits for each sentence.
         '''
-        ### TODO
         cls_embedding = self.forward(input_ids, attention_mask)
         logits = self.sentiment_classifier(cls_embedding)
         return logits
@@ -150,6 +149,13 @@ class MultitaskBERT(nn.Module):
         logits = self.similarity_classifier(cls_embedding)
         return logits
 
+def save_checkpoint(bert, classifier, checkpoint_path):
+    save_info = {
+        'bert': bert.cpu().state_dict(),
+        'classifier': classifier.cpu().state_dict()
+    }
+    torch.save(save_info, checkpoint_path)
+    print(f"save the model checkpoint to {checkpoint_path}")   
 
 def save_model(model, optimizer, args, config, filepath):
     save_info = {
@@ -364,6 +370,10 @@ def train_multitask(args):
 
         print(f'Semantic Textual Similarity train correlation: {sts_train_corr:.3f}')
         print(f'Semantic Textual Similarity dev correlation: {sts_dev_corr:.3f}')
+    
+    save_checkpoint(model.bert, model.sentiment_classifier, f'sst_{args.filepath}')
+    save_checkpoint(model.bert, model.paraphrase_classifier, f'para_{args.filepath}')
+    save_checkpoint(model.bert, model.similarity_classifier, f'sts_{args.filepath}')
 
 
 def test_multitask(args):
