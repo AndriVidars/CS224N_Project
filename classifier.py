@@ -581,8 +581,15 @@ if __name__ == "__main__":
     test_out_cfimdb = f'{base_test_out}{lora_details}_{args.lr_bert}_{args.lr_class}{bagg_details}-cdimdb-test-out.csv'
 
     n = lr_args.n_lr_steps
-    bert_lrs = np.linspace(lr_args.lr_bert_min, lr_args.lr_bert_max, n)
-    class_lrs = np.linspace(lr_args.lr_class_min, lr_args.lr_class_max, n)
+
+    class_min = lr_args.lr_class_min
+    class_max = lr_args.lr_class_max
+
+    bert_min = lr_args.lr_bert_min
+    bert_max = lr_args.lr_bert_max
+    
+    bert_lrs = np.linspace(bert_min, bert_max, n)
+    class_lrs = np.linspace(class_min, class_max, n)
     
     results_sst = pd.DataFrame(np.zeros([n, n]), index = bert_lrs, columns = class_lrs)
     results_cfimdb = pd.DataFrame(np.zeros([n, n]), index = bert_lrs, columns = class_lrs)
