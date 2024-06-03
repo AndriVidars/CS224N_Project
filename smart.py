@@ -71,10 +71,6 @@ class MultitaskBERT(nn.Module):
                                                   use_lora = True,
                                                   lora_rank = config.lora_rank,
                                                   lora_svd_init = config.lora_svd_init)
-        elif config.use_siar:
-            self.bert = BertModel.from_pretrained('bert-base-uncased',
-                                                  siar_lamb = config.siar_lamb,
-                                                  siar_eps = config.siar_eps)
         else:
             self.bert = BertModel.from_pretrained('bert-base-uncased')
 
@@ -99,6 +95,10 @@ class MultitaskBERT(nn.Module):
         self.paraphrase_classifier = nn.Linear(BERT_HIDDEN_SIZE * 2, 1)
         self.similarity_classifier = nn.Linear(BERT_HIDDEN_SIZE * 2, 1)
 
+        # SIAR parameters
+        self.siar_lamb = config.siar_lamb
+        self.siar_eps = config.siar_eps
+
     def forward(self, input_ids, attention_mask):
         'Takes a batch of sentences and produces embeddings for them.'
         # The final BERT embedding is the hidden state of [CLS] token (the first token)
@@ -110,7 +110,16 @@ class MultitaskBERT(nn.Module):
         cls_embedding = outputs['last_hidden_state'][:, 0, :]
         cls_embedding = self.dropout(cls_embedding)
         return cls_embedding
-
+    
+    # SIAR =========================
+    def forward_with_noise(self, input_ids, attention_mask):
+        'Produces noisy embeddings for the sentences, used for SIAR.'
+        ### TODO
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        cls_embedding = outputs['last_hidden_state'][:, 0, :]
+        cls_embedding = self.dropout(cls_embedding)
+        return cls_embedding + self.siar_eps * torch.randn_like(cls_embedding)
+    # ==============================
 
     def predict_sentiment(self, input_ids, attention_mask):
         '''Given a batch of sentences, outputs logits for classifying sentiment.
@@ -153,51 +162,55 @@ class MultitaskBERT(nn.Module):
         logits = self.similarity_classifier(cls_embedding)
         return logits
     
-    # SIAR
+    # SIAR =========================
+    def predict_sentiment_siar(self, input_ids, attention_mask):
+        cls_embedding = self.forward_with_noise(input_ids, attention_mask)
+        logits = self.sentiment_classifier(cls_embedding)
+        return logits
+
+    def predict_paraphrase_siar(self,
+                           input_ids_1, attention_mask_1,
+                           input_ids_2, attention_mask_2):
+        cls_embedding_1 = self.forward_with_noise(input_ids_1, attention_mask_1)
+        cls_embedding_2 = self.forward_with_noise(input_ids_2, attention_mask_2)
+        cls_embedding = torch.cat([cls_embedding_1, cls_embedding_2], dim=1)
+
+        logits = self.paraphrase_classifier(cls_embedding)
+        return logits
+
+    def predict_similarity_siar(self,
+                           input_ids_1, attention_mask_1,
+                           input_ids_2, attention_mask_2):
+        cls_embedding_1 = self.forward_with_noise(input_ids_1, attention_mask_1)
+        cls_embedding_2 = self.forward_with_noise(input_ids_2, attention_mask_2)
+        cls_embedding = torch.cat([cls_embedding_1, cls_embedding_2], dim=1)
+
+        logits = self.similarity_classifier(cls_embedding)
+        return logits
     
-    def siar_reg_loss_sentiment(self, input_ids, attention_mask, eps):
-        '''SIAR regularization loss for sentiment classification task.
-        '''
-        perturbed_input_ids = input_ids + torch.randn_like(input_ids) * eps
+    def siar_reg_loss_sentiment(self, input_ids, attention_mask):
+        '''SIAR regularization loss for sentiment classification task.'''
         logits = self.predict_sentiment(input_ids, attention_mask)
-        perturbed_logits = self.predict_sentiment(perturbed_input_ids, attention_mask)
-
-        assert torch.all(logits >= 0) and torch.all(logits <= 1)
-        assert torch.all(perturbed_logits >= 0) and torch.all(perturbed_logits <= 1)
-        loss = F.kl_div(logits.view(-1), perturbed_logits.view(-1), reduction='batchmean')
-
+        perturbed_logits = self.predict_sentiment_siar(input_ids, attention_mask) # uses the noisy embeddings
+        loss = F.kl_div(F.log_softmax(logits, dim=1), F.softmax(perturbed_logits, dim=1), reduction='batchmean')
         return loss
     
-    def siar_reg_loss_paraphrase(self, input_ids_1, attention_mask_1, input_ids_2, attention_mask_2, eps):
+    def siar_reg_loss_paraphrase(self, input_ids_1, attention_mask_1, input_ids_2, attention_mask_2):
         '''SIAR regularization loss for paraphrase detection task.'''
-        perturbed_input_ids_1 = input_ids_1 + torch.randn_like(input_ids_1) * eps
-        perturbed_input_ids_2 = input_ids_2 + torch.randn_like(input_ids_2) * eps
-
         logits = self.predict_paraphrase(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
-        perturbed_logits = self.predict_paraphrase(perturbed_input_ids_1, attention_mask_1, perturbed_input_ids_2, attention_mask_2)
-
-        assert torch.all(logits >= 0) and torch.all(logits <= 1)
-        assert torch.all(perturbed_logits >= 0) and torch.all(perturbed_logits <= 1)
-        # loss = F.kl_div(F.log_softmax(logits, dim=1), F.softmax(perturbed_logits, dim=1), reduction='batchmean')
-        loss = F.kl_div(logits.view(-1), perturbed_logits.view(-1), reduction='batchmean')
+        perturbed_logits = self.predict_paraphrase_siar(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
+        loss = F.kl_div(F.log_softmax(logits, dim=1), F.softmax(perturbed_logits, dim=1), reduction='batchmean')
         return loss
     
-    def siar_reg_loss_similarity(self, input_ids_1, attention_mask_1, input_ids_2, attention_mask_2, eps):
+    def siar_reg_loss_similarity(self, input_ids_1, attention_mask_1, input_ids_2, attention_mask_2):
         '''SIAR regularization loss for similarity task.'''
-        perturbed_input_ids_1 = input_ids_1 + torch.randn_like(input_ids_1) * eps
-        perturbed_input_ids_2 = input_ids_2 + torch.randn_like(input_ids_2) * eps
-
         logits = self.predict_similarity(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
-        perturbed_logits = self.predict_similarity(perturbed_input_ids_1, attention_mask_1, perturbed_input_ids_2, attention_mask_2)
-
-        # if not the case, change to squared loss
-        assert torch.all(logits >= 0) and torch.all(logits <= 1)
-        assert torch.all(perturbed_logits >= 0) and torch.all(perturbed_logits <= 1)
-        loss = F.kl_div(logits.view(-1), perturbed_logits.view(-1), reduction='batchmean')
-        #loss = F.kl_div(F.log_softmax(logits, dim=1), F.softmax(perturbed_logits, dim=1), reduction='batchmean')
+        perturbed_logits = self.predict_similarity_siar(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
+        loss = F.kl_div(F.log_softmax(logits, dim=1), F.softmax(perturbed_logits, dim=1), reduction='batchmean')
 
         return loss
-    
+    # ==============================
+
 
 def save_model(model, optimizer, args, config, filepath):
     save_info = {
@@ -260,9 +273,8 @@ def train_multitask(args):
               'fine_tune_mode': args.fine_tune_mode,
               'lora_rank': args.lora_rank,
               'lora_svd_init': args.lora_svd_init,
-              'use_siar': args.use_siar,
               'siar_lamb': args.siar_lamb,
-              'siar_eps': args.siar_eps}
+              'siar_eps': args.siar_eps,}
     
     config = SimpleNamespace(**config)
 
@@ -308,17 +320,17 @@ def train_multitask(args):
             try:
                 para_logits = model.predict_paraphrase(para_ids1, para_mask1, para_ids2, para_mask2)
                 para_loss = F.binary_cross_entropy_with_logits(para_logits.view(-1), para_labels.view(-1), reduction='sum') / para_batch_size
-                 # SIAR ==
+                 # SIAR =========
                 if args.use_siar: 
-                    para_loss += model.siar_reg_loss_paraphrase(para_ids1, para_mask1, para_ids2, para_mask2, args.siar_eps)/ para_batch_size
-                # ======== 
+                    para_loss += args.siar_lamb + model.siar_reg_loss_paraphrase(para_ids1, para_mask1, para_ids2, para_mask2)/ para_batch_size
+                # =============== 
                 total_loss += para_loss
                 if args.backward_sep:
                     para_loss.backward()
                     optimizer.step()
                     optimizer.zero_grad()
                     all_miss = False
-            except:
+            except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache()
             
             del para_ids1, para_mask1, para_ids2, para_mask2, para_labels, para_logits, para_loss
@@ -336,16 +348,17 @@ def train_multitask(args):
                 try:
                     sst_logits = model.predict_sentiment(sst_ids, sst_mask)
                     sst_loss = F.cross_entropy(sst_logits, sst_labels.view(-1), reduction='sum') / sst_batch_size
-                     # SIAR ==
+                    # SIAR =========
                     if args.use_siar:
-                        sst_loss += model.siar_reg_loss_sentiment(sst_ids, sst_mask, args.siar_eps)/ sst_batch_size
-                    # ======== 
+                        sst_loss += args.siar_lamb * model.siar_reg_loss_sentiment(sst_ids, sst_mask)/ sst_batch_size
+                    # =============== 
+                    total_loss += sst_loss
                     if args.backward_sep:
                         sst_loss.backward()
                         optimizer.step()
                         optimizer.zero_grad()
                         all_miss = False
-                except:
+                except torch.cuda.OutOfMemoryError:
                     torch.cuda.empty_cache()
                 
                 del sst_ids, sst_mask, sst_labels, sst_logits, sst_loss
@@ -367,17 +380,17 @@ def train_multitask(args):
                 try:
                     sts_logits = model.predict_similarity(sts_ids1, sts_mask1, sts_ids2, sts_mask2)
                     sts_loss = F.mse_loss(sts_logits.view(-1), sts_scores.view(-1), reduction='sum') / sts_batch_size
-                     # SIAR ==
+                    # SIAR =========
                     if args.use_siar:
-                        sts_loss += model.siar_reg_loss_similarity(sts_ids1, sts_mask1, sts_ids2, sts_mask2, args.siar_eps)/ sts_batch_size
-                    # ======== 
+                        sts_loss += args.siar_lamb * model.siar_reg_loss_similarity(sts_ids1, sts_mask1, sts_ids2, sts_mask2)/sts_batch_size
+                    # =============== 
                     total_loss += sts_loss
                     if args.backward_sep:
                         sts_loss.backward()
                         optimizer.step()
                         optimizer.zero_grad()
                         all_miss = False
-                except:
+                except torch.cuda.OutOfMemoryError:
                     torch.cuda.empty_cache()
                 
                 del sts_ids1, sts_mask1, sts_ids2, sts_mask2, sts_scores, sts_logits, sts_loss
@@ -400,11 +413,7 @@ def train_multitask(args):
                     num_batches += 1
 
         print(f'Number of missed iters in epoch, {miss_iter}')
-        if num_batches == 0:
-            print(f"{num_batches=}")
-            continue
-        else:
-            train_loss = train_loss / num_batches
+        train_loss = train_loss / num_batches
 
         # Evaluate on SST dev sets using the multitask model (need to evaluate on the other datasets later)
         (sst_train_acc,_, _,para_train_acc, _,_,sts_train_corr, _,_) = model_eval_multitask(sst_train_dataloader, 
@@ -555,9 +564,9 @@ def get_args():
     parser.add_argument("--sts_test_out", type=str, default="predictions/sts-test-output-multi")
     
     # different batch sizes for each task
-    parser.add_argument("--batch_size_sst", type=int, default=32) # dont know the memory cap
-    parser.add_argument("--batch_size_para", type=int, default=64)
-    parser.add_argument("--batch_size_sts", type=int, default=32)
+    parser.add_argument("--batch_size_sst", type=int, default=8) # dont know the memory cap, 32
+    parser.add_argument("--batch_size_para", type=int, default=16) # 64
+    parser.add_argument("--batch_size_sts", type=int, default=8) # 32
     parser.add_argument("--train_ratio_sst", type=float, default=1.0)
     parser.add_argument("--train_ratio_para", type=float, default=0.25) # by default not train on all quora data
     parser.add_argument("--train_ratio_sts", type=float, default=1.0)
