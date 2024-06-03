@@ -623,38 +623,38 @@ if __name__ == "__main__":
                 print('Training Sentiment Classifier on SST...')
                 min_sst = train(config_sst)
 
-            print('Training Sentiment Classifier on cfimdb...')
-            config_cfimbd = SimpleNamespace(
-                filepath=filepath_cfimdb,
-                lr_bert=lr_bert,
-                lr_class=lr_class,
-                use_gpu=args.use_gpu,
-                epochs=args.epochs,
-                batch_size=8,
-                hidden_dropout_prob=args.hidden_dropout_prob,
-                train='data/ids-cfimdb-train.csv',
-                dev='data/ids-cfimdb-dev.csv',
-                test='data/ids-cfimdb-test-student.csv',
-                fine_tune_mode=args.fine_tune_mode,
-                dev_out = dev_out_cdimdb,
-                test_out = test_out_cfimdb,
-                lora_rank=args.lora_rank,
-                lora_svd_init=args.lora_svd_init,
-                weight_decay=args.weight_decay,
-                n_models = args.n_models_bagging
-            )
+            # print('Training Sentiment Classifier on cfimdb...')
+            # config_cfimbd = SimpleNamespace(
+            #     filepath=filepath_cfimdb,
+            #     lr_bert=lr_bert,
+            #     lr_class=lr_class,
+            #     use_gpu=args.use_gpu,
+            #     epochs=args.epochs,
+            #     batch_size=8,
+            #     hidden_dropout_prob=args.hidden_dropout_prob,
+            #     train='data/ids-cfimdb-train.csv',
+            #     dev='data/ids-cfimdb-dev.csv',
+            #     test='data/ids-cfimdb-test-student.csv',
+            #     fine_tune_mode=args.fine_tune_mode,
+            #     dev_out = dev_out_cdimdb,
+            #     test_out = test_out_cfimdb,
+            #     lora_rank=args.lora_rank,
+            #     lora_svd_init=args.lora_svd_init,
+            #     weight_decay=args.weight_decay,
+            #     n_models = args.n_models_bagging
+            # )
 
-            if args.use_bagging:
-                print('Training Bagging Ensamble Classifier on cfimbd...')
-                min_cfimdb = train_bagg(config_cfimbd)
-            else:
-                print('Training Sentiment Classifier on cfimdb...')
-                min_cfimdb = train(config_cfimbd)
+            # if args.use_bagging:
+            #     print('Training Bagging Ensamble Classifier on cfimbd...')
+            #     min_cfimdb = train_bagg(config_cfimbd)
+            # else:
+            #     print('Training Sentiment Classifier on cfimdb...')
+            #     min_cfimdb = train(config_cfimbd)
                 
             results_sst.iloc[i, j] = min_sst
-            results_cfimdb.iloc[i, j] = min_cfimdb
+            #results_cfimdb.iloc[i, j] = min_cfimdb
             
             #Write to csv each time just so results aren't lost if job is cut short or another issue is encountered.
             results_sst.to_csv(lr_search_file_sst)
-            results_cfimdb.to_csv(lr_search_file_cfimdb)
+            #results_cfimdb.to_csv(lr_search_file_cfimdb)
             
