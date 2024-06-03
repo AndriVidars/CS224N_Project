@@ -330,7 +330,7 @@ def train(args):
         if args.train_verbose:
             print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
         
-        return best_dev_acc
+    return best_dev_acc
 
 
 def train_bagg(args):
