@@ -269,7 +269,7 @@ def train_multitask(args):
                     optimizer.step()
                     optimizer.zero_grad()
                     all_miss = False
-            except:
+            except torch.cuda.OutOfMemoryError:
                 torch.cuda.empty_cache()
             
             if (i + 1) % para_sst_ratio == 0 or (i + 1) == num_batches_para:
@@ -289,7 +289,7 @@ def train_multitask(args):
                         optimizer.step()
                         optimizer.zero_grad()
                         all_miss = False
-                except:
+                except torch.cuda.OutOfMemoryError:
                     torch.cuda.empty_cache()
                 
 
@@ -314,7 +314,7 @@ def train_multitask(args):
                         optimizer.step()
                         optimizer.zero_grad()
                         all_miss = False
-                except:
+                except torch.cuda.OutOfMemoryError:
                     torch.cuda.empty_cache()
                         
             # Should we use weighted sum? I think this should suffice
@@ -324,7 +324,7 @@ def train_multitask(args):
                     optimizer.step()
                     train_loss += total_loss.item()
                     num_batches += 1
-                except:
+                except torch.cuda.OutOfMemoryError:
                     miss_iter += 1
                     torch.cuda.empty_cache()
             
@@ -491,9 +491,9 @@ def get_args():
     parser.add_argument("--sts_test_out", type=str, default="predictions/sts-test-output-multi")
     
     # different batch sizes for each task
-    parser.add_argument("--batch_size_sst", type=int, default=8) # dont know the memory cap
-    parser.add_argument("--batch_size_para", type=int, default=16)
-    parser.add_argument("--batch_size_sts", type=int, default=8)
+    parser.add_argument("--batch_size_sst", type=int, default=16) # dont know the memory cap
+    parser.add_argument("--batch_size_para", type=int, default=32)
+    parser.add_argument("--batch_size_sts", type=int, default=16)
     parser.add_argument("--train_ratio_sst", type=float, default=1.0)
     parser.add_argument("--train_ratio_para", type=float, default=0.25) # by default not train on all quora data
     parser.add_argument("--train_ratio_sts", type=float, default=1.0)
