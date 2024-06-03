@@ -584,8 +584,8 @@ if __name__ == "__main__":
     bert_lrs = np.linspace(lr_args.lr_bert_min, lr_args.lr_bert_max, n)
     class_lrs = np.linspace(lr_args.lr_class_min, lr_args.lr_class_max, n)
 
-    results_sst = pd.DataFrame(np.zeros([n, n]), rows = bert_lrs, columns = class_lrs)
-    results_cfimdb = pd.DataFrame(np.zeros([n, n]), rows = bert_lrs, columns = class_lrs)
+    results_sst = pd.DataFrame(np.zeros([n, n]), index = bert_lrs, columns = class_lrs)
+    results_cfimdb = pd.DataFrame(np.zeros([n, n]), index = bert_lrs, columns = class_lrs)
     
     lr_search_file_sst = f'lr_searches/sst_{class_min}-{class_max}__bert_{bert_min}-{bert_max}_{lora_details}{bagg_details}.csv'
     lr_search_file_cfimdb = f'lr_searches/cfimdb_{class_min}-{class_max}__bert_{bert_min}-{bert_max}_{lora_details}{bagg_details}.csv'
