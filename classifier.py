@@ -583,12 +583,12 @@ if __name__ == "__main__":
     n = lr_args.n_lr_steps
     bert_lrs = np.linspace(lr_args.lr_bert_min, lr_args.lr_bert_max, n)
     class_lrs = np.linspace(lr_args.lr_class_min, lr_args.lr_class_max, n)
-
+    
     results_sst = pd.DataFrame(np.zeros([n, n]), index = bert_lrs, columns = class_lrs)
     results_cfimdb = pd.DataFrame(np.zeros([n, n]), index = bert_lrs, columns = class_lrs)
     
-    lr_search_file_sst = f'lr_searches/sst_{class_min}-{class_max}__bert_{bert_min}-{bert_max}_{lora_details}{bagg_details}.csv'
-    lr_search_file_cfimdb = f'lr_searches/cfimdb_{class_min}-{class_max}__bert_{bert_min}-{bert_max}_{lora_details}{bagg_details}.csv'
+    lr_search_file_sst = f'lr_searches/sst_class_{class_min}-{class_max}__bert_{bert_min}-{bert_max}_{args.fine_tune_mode}_{lora_details}{bagg_details}.csv'
+    lr_search_file_cfimdb = f'lr_searches/cfimdb_class_{class_min}-{class_max}__bert_{bert_min}-{bert_max}_{args.fine_tune_mode}_{lora_details}{bagg_details}.csv'
     
     for i in range(n):
         for j in range(n):
