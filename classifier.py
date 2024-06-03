@@ -281,10 +281,10 @@ def train(args):
 
     model = BertSentimentClassifier(config)
     model = model.to(device)
-    print(f'training device, {device}\n')
-
     n_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Number of trainable parameters, {format(n_trainable_params, ',')}")
+    if args.train_verbose:
+        print(f'training device, {device}\n')
+        print(f"Number of trainable parameters, {format(n_trainable_params, ',')}")
     
     # set different learning rate for 
     optimizer = AdamW([
@@ -324,9 +324,14 @@ def train(args):
 
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
-            save_model(model, optimizer, args, config, args.filepath)
+            if args.save_models:
+                save_model(model, optimizer, args, config, args.filepath)
+        
+        if args.train_verbose:
+            print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+        
+        return best_dev_acc
 
-        print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
 
 def train_bagg(args):
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
@@ -618,7 +623,9 @@ if __name__ == "__main__":
         lora_rank=args.lora_rank,
         lora_svd_init=args.lora_svd_init,
         weight_decay=args.weight_decay,
-        n_models = args.n_models_bagging
+        n_models = args.n_models_bagging,
+        save_models = True,
+        train_verbose = True
     )
 
     if args.use_bagging:
