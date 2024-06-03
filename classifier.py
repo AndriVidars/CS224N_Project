@@ -327,6 +327,7 @@ def train(args):
             save_model(model, optimizer, args, config, args.filepath)
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
+    return best_dev_acc
 
 def train_bagg(args):
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
@@ -428,7 +429,7 @@ def train_bagg(args):
     
     write_pred_file(eval_preds_out, args.dev_out)
     write_pred_file(test_preds_out, args.test_out)
-    return
+    return best_dev_acc
 
 def write_pred_file(preds, filepath):
     with open(filepath, "w+") as f:
@@ -540,12 +541,20 @@ def get_args():
     parser.add_argument("--use_bagging", action='store_true')
     parser.add_argument('--n_models_bagging', type=int, help='Number of models to use in bagging ensamble', default=10)
 
-    args = parser.parse_args()
-    return args
+    parser2 = argparse.ArgumentParser()
+    parser2.add_argument("--lr_class_min", type=float, help="Minimum learning rate for the learning rate range of classifier", default=5e-4)
+    parser2.add_argument("--lr_class_max", type=float, help="Maximum learning rate for the learning rate range of classifier", default=5e-2)
+    parser2.add_argument("--lr_bert_min", type=float, help="Minimum learning rate for the learning rate range of the bert model", default=5e-5)
+    parser2.add_argument("--lr_bert_max", type=float, help="Maximum learning rate for the learning rate range of the bert model", default=5e-3)
+    parser2.add_argument("--n_lr_steps", type = int, help="Number of learning rate steps in both the classifier and bert model", default = 10)
+    
+    args, _ = parser.parse_known_args()
+    args2, _ = parser2.parse_known_args()
+    return args, args2
 
 
 if __name__ == "__main__":
-    args = get_args()
+    args, lr_args = get_args()
     #seed_everything(args.seed)
 
     base_filepath_sst = f'classifier_{args.fine_tune_mode}'
@@ -570,62 +579,81 @@ if __name__ == "__main__":
     dev_out_cdimdb = f'{base_dev_out}{lora_details}_{args.lr_bert}_{args.lr_class}{bagg_details}-cfimdb-dev-out.csv'
     test_out_cfimdb = f'{base_test_out}{lora_details}_{args.lr_bert}_{args.lr_class}{bagg_details}-cdimdb-test-out.csv'
 
-    config_sst = SimpleNamespace(
-        filepath=filepath_sst,
-        lr_bert=args.lr_bert,
-        lr_class=args.lr_class,
-        use_gpu=args.use_gpu,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        hidden_dropout_prob=args.hidden_dropout_prob,
-        train='data/ids-sst-train.csv', # modify to use augmented data
-        dev='data/ids-sst-dev.csv',
-        test='data/ids-sst-test-student.csv',
-        fine_tune_mode=args.fine_tune_mode,
-        dev_out = dev_out_sst,
-        test_out = test_out_sst,
-        lora_rank=args.lora_rank,
-        lora_svd_init=args.lora_svd_init,
-        weight_decay=args.weight_decay,
-        n_models = args.n_models_bagging
-    )
+    n = lr_args.n_lr_steps
+    bert_lrs = np.linspace(lr_args.lr_bert_min, lr_args.lr_bert_max, n)
+    class_lrs = np.linspace(lr_args.lr_class_min, lr_args.lr_class_max, n)
 
-    if args.use_bagging:
-        print('Training Bagging Ensamble Classifier on SST...')
-        train_bagg(config_sst)
-        
-    else:
-        print('Training Sentiment Classifier on SST...')
-        train(config_sst)
-        print('Evaluating on SST...')
-        test(config_sst)
+    results_sst = pd.DataFrame(np.zeros([n_steps, n_steps]), rows = bert_lrs, columns = class_lrs)
+    results_cfimdb = pd.DataFrame(np.zeros([n_steps, n_steps]), rows = bert_lrs, columns = class_lrs)
+    
+    lr_search_file_sst = f'lr_searches/sst_{class_min}-{class_max}__bert_{bert_min}-{bert_max}_{lora_details}{bagg_details}.csv'
+    lr_search_file_cfimdb = f'lr_searches/cfimdb_{class_min}-{class_max}__bert_{bert_min}-{bert_max}_{lora_details}{bagg_details}.csv'
+    
+    for i in range(n):
+        for j in range(n):
+            lr_bert = bert_lrs[i]
+            lr_class = class_lrs[j]
+            
+            config_sst = SimpleNamespace(
+                filepath=filepath_sst,
+                lr_bert=lr_bert,
+                lr_class=lr_class,
+                use_gpu=args.use_gpu,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                hidden_dropout_prob=args.hidden_dropout_prob,
+                train='data/ids-sst-train.csv', # modify to use augmented data
+                dev='data/ids-sst-dev.csv',
+                test='data/ids-sst-test-student.csv',
+                fine_tune_mode=args.fine_tune_mode,
+                dev_out = dev_out_sst,
+                test_out = test_out_sst,
+                lora_rank=args.lora_rank,
+                lora_svd_init=args.lora_svd_init,
+                weight_decay=args.weight_decay,
+                n_models = args.n_models_bagging
+            )
 
-    print('Training Sentiment Classifier on cfimdb...')
-    config_cfimbd = SimpleNamespace(
-        filepath=filepath_cfimdb,
-        lr_bert=args.lr_bert,
-        lr_class=args.lr_class,
-        use_gpu=args.use_gpu,
-        epochs=args.epochs,
-        batch_size=8,
-        hidden_dropout_prob=args.hidden_dropout_prob,
-        train='data/ids-cfimdb-train.csv',
-        dev='data/ids-cfimdb-dev.csv',
-        test='data/ids-cfimdb-test-student.csv',
-        fine_tune_mode=args.fine_tune_mode,
-        dev_out = dev_out_cdimdb,
-        test_out = test_out_cfimdb,
-        lora_rank=args.lora_rank,
-        lora_svd_init=args.lora_svd_init,
-        weight_decay=args.weight_decay,
-        n_models = args.n_models_bagging
-    )
+            if args.use_bagging:
+                print('Training Bagging Ensamble Classifier on SST...')
+                min_sst = train_bagg(config_sst)
+                
+            else:
+                print('Training Sentiment Classifier on SST...')
+                min_sst = train(config_sst)
 
-    if args.use_bagging:
-        print('Training Bagging Ensamble Classifier on cfimbd...')
-        train_bagg(config_cfimbd)
-    else:
-        print('Training Sentiment Classifier on cfimdb...')
-        train(config_cfimbd)
-        print('Evaluating on cfimdb...')
-        test(config_cfimbd)
+            print('Training Sentiment Classifier on cfimdb...')
+            config_cfimbd = SimpleNamespace(
+                filepath=filepath_cfimdb,
+                lr_bert=lr_bert,
+                lr_class=lr_class,
+                use_gpu=args.use_gpu,
+                epochs=args.epochs,
+                batch_size=8,
+                hidden_dropout_prob=args.hidden_dropout_prob,
+                train='data/ids-cfimdb-train.csv',
+                dev='data/ids-cfimdb-dev.csv',
+                test='data/ids-cfimdb-test-student.csv',
+                fine_tune_mode=args.fine_tune_mode,
+                dev_out = dev_out_cdimdb,
+                test_out = test_out_cfimdb,
+                lora_rank=args.lora_rank,
+                lora_svd_init=args.lora_svd_init,
+                weight_decay=args.weight_decay,
+                n_models = args.n_models_bagging
+            )
+
+            if args.use_bagging:
+                print('Training Bagging Ensamble Classifier on cfimbd...')
+                min_cfimdb = train_bagg(config_cfimbd)
+            else:
+                print('Training Sentiment Classifier on cfimdb...')
+                min_cfimdb = train(config_cfimbd)
+                
+            results_sst.iloc[i, j] = min_sst
+            results_cfimdb.iloc[i, j] = min_cfimdb
+            
+            #Write to csv each time just so results aren't lost if job is cut short or another issue is encountered.
+            results_sst.to_csv(lr_search_file_sst)
+            results_cfimdb.to_csv(lr_search_file_cfimdb)
+            
