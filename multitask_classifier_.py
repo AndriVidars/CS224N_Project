@@ -312,6 +312,7 @@ def train_multitask(args):
     
     # run for the specified number of epochs
     for epoch in range(args.epochs):
+        model.to(device)
         model.train()
         train_loss = 0.0
         num_batches = 0
