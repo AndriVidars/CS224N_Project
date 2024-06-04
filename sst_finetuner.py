@@ -34,6 +34,9 @@ class SentimentBERT(nn.Module):
         self.sentiment_classifier = nn.Linear(BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES)
         self.sentiment_classifier.load_state_dict(classifier_state_dict)
 
+        self.siar_lamb = config.siar_lamb
+        self.siar_eps = config.siar_eps
+
         assert config.fine_tune_mode in ["last-linear-layer", "full-model", "lora"]
         if config.fine_tune_mode == 'lora':
             for name, param in self.bert.named_parameters():
@@ -54,6 +57,8 @@ class SentimentBERT(nn.Module):
         cls_embedding = outputs['last_hidden_state'][:, 0, :]
         cls_embedding = self.dropout(cls_embedding)
         return cls_embedding
+    
+    
 
     def predict_sentiment(self, input_ids, attention_mask):
         '''Given a batch of sentences, outputs logits for classifying sentiment.
@@ -64,6 +69,27 @@ class SentimentBERT(nn.Module):
         cls_embedding = self.forward(input_ids, attention_mask)
         logits = self.sentiment_classifier(cls_embedding)
         return logits
+    
+    # SIAR =========================
+    def forward_with_noise(self, input_ids, attention_mask):
+        'Produces noisy embeddings for the sentences, used for SIAR.'
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        cls_embedding = outputs['last_hidden_state'][:, 0, :]
+        cls_embedding = self.dropout(cls_embedding)
+        return cls_embedding + self.siar_eps * torch.randn_like(cls_embedding)
+    
+    def predict_sentiment_siar(self, input_ids, attention_mask):
+        cls_embedding = self.forward_with_noise(input_ids, attention_mask)
+        logits = self.sentiment_classifier(cls_embedding)
+        return logits
+    
+    def siar_reg_loss_sentiment(self, input_ids, attention_mask):
+        '''SIAR regularization loss for sentiment classification task.'''
+        logits = self.predict_sentiment(input_ids, attention_mask)
+        perturbed_logits = self.predict_sentiment_siar(input_ids, attention_mask) # uses the noisy embeddings
+        loss = F.kl_div(F.log_softmax(logits, dim=1), F.softmax(perturbed_logits, dim=1), reduction='batchmean')
+        return loss
+    # ==============================
 
 def train(args, sst_train_data, sst_dev_data, sst_test_data):
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
@@ -74,7 +100,8 @@ def train(args, sst_train_data, sst_dev_data, sst_test_data):
     sst_test_data = SentenceClassificationTestDataset(sst_test_data, args)
     sst_test_dataloader = DataLoader(sst_test_data, shuffle=True, batch_size=args.batch_size, collate_fn=sst_test_data.collate_fn)
 
-    config = gen_config(args.fine_tune_mode, args.lora_rank, args.lora_svd_init, args.lora_pretrained)
+    config = gen_config(args.fine_tune_mode, args.lora_rank, args.lora_svd_init, args.lora_pretrained,
+                        args.use_siar, args.siar_lamb, args.siar_eps)
     saved_checkpoint = torch.load(args.load_checkpoint_path)
 
     model = SentimentBERT(config, saved_checkpoint['bert'] , saved_checkpoint['classifier'])
@@ -109,6 +136,9 @@ def train(args, sst_train_data, sst_dev_data, sst_test_data):
             optimizer.zero_grad()
             logits = model.predict_sentiment(ids, mask)
             loss = F.cross_entropy(logits, labels.view(-1), reduction='sum') / batch_size
+            if args.use_siar:
+                loss += args.siar_lamb * model.siar_reg_loss_sentiment(ids, mask)/ batch_size
+
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
@@ -181,54 +211,9 @@ def write_pred_file(pred_dict, filepath):
             f.write(f"id \t Predicted_Sentiment \n")
             for p, s in pred_dict.items():
                 f.write(f"{p} , {s} \n")      
-
-# Test is run within train, so this function is not important/used
-# Does not work with bagging models
-def test(args):
-    with torch.no_grad():
-        device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
-        saved = torch.load(args.dump_checkpoint_path)
-        config = saved['config']
-        config.lora_post = True
-
-        model = SentimentBERT(config, saved['bert'], saved['classifier'])
-        model = model.to(device)
-        print(f"Loaded model to test from {args.dump_checkpoint_path}")
-
-        sst_test_data, num_labels,para_test_data, sts_test_data = \
-            load_multitask_data(args.sst_test,args.para_test, args.sts_test, split='test')
-
-        sst_dev_data, num_labels,para_dev_data, sts_dev_data = \
-            load_multitask_data(args.sst_dev,args.para_dev,args.sts_dev,split='dev')
         
-        sst_test_data = SentenceClassificationTestDataset(sst_test_data, args)
-        sst_dev_data = SentenceClassificationDataset(sst_dev_data, args)
-
-        sst_test_dataloader = DataLoader(sst_test_data, shuffle=True, batch_size=args.batch_size,
-                                         collate_fn=sst_test_data.collate_fn)
-        sst_dev_dataloader = DataLoader(sst_dev_data, shuffle=False, batch_size=args.batch_size,
-                                        collate_fn=sst_dev_data.collate_fn)
-
-
-        dev_sentiment_accuracy, _, dev_sst_y_pred, _, _, dev_sst_sent_ids \
-              = model_eval_sst(sst_dev_dataloader, model, device)
-
-        test_sst_y_pred, test_sst_sent_ids \
-            = model_eval_test_sst(sst_test_dataloader, model, device)
-
-        with open(args.sst_dev_out, "w+") as f:
-            print(f"dev sentiment acc :: {dev_sentiment_accuracy :.3f}")
-            f.write(f"id \t Predicted_Sentiment \n")
-            for p, s in zip(dev_sst_sent_ids, dev_sst_y_pred):
-                f.write(f"{p} , {s} \n")
-
-        with open(args.sst_test_out, "w+") as f:
-            f.write(f"id \t Predicted_Sentiment \n")
-            for p, s in zip(test_sst_sent_ids, test_sst_y_pred):
-                f.write(f"{p} , {s} \n")
-
-        
-def gen_config(fine_tune_mode, lora_rank=None, lora_svd_init=None, lora_pretrained=False):
+def gen_config(fine_tune_mode, lora_rank=None, lora_svd_init=None, lora_pretrained=False,
+               use_siar=False, siar_lamb=None, siar_eps=None):
     config = {
         "num_labels": N_SENTIMENT_CLASSES,
         "hidden_size": 768,
@@ -252,7 +237,10 @@ def gen_config(fine_tune_mode, lora_rank=None, lora_svd_init=None, lora_pretrain
         "gradient_checkpointing": False,
         "position_embedding_type": "absolute",
         "use_cache": True,
-        "lora_post": lora_pretrained
+        "lora_post": lora_pretrained,
+        "use_siar": use_siar,
+        "siar_lamb": siar_lamb,
+        "siar_eps": siar_eps
     }
 
     return SimpleNamespace(**config)
@@ -272,12 +260,12 @@ def get_args():
     parser.add_argument("--sts_test", type=str, default="data/sts-test-student.csv")
     ##############################################################################
 
-    parser.add_argument("--load_checkpoint_path", type=str, default="sst_full-model-10-1e-05-0.0001-multitask.pt")
+    parser.add_argument("--load_checkpoint_path", type=str, default="sst_full-model-siar-0.1-0.1-1-1e-05-0.0001-multitask.pt")
 
     parser.add_argument("--seed", type=int, default=11711)
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--fine-tune-mode", type=str,
-                        choices=('last-linear-layer', 'full-model', 'lora'), default="last-linear-layer")
+                        choices=('last-linear-layer', 'full-model', 'lora'), default="full-model")
     parser.add_argument("--use_gpu", action='store_true')
 
     parser.add_argument("--sst_dev_out", type=str, default="predictions/sst-dev-output-ft")
@@ -298,6 +286,10 @@ def get_args():
     parser.add_argument('--n_models_bagging', type=int, help='Number of models to use in bagging ensamble', default=10)
     parser.add_argument("--save_checkpoints", action='store_true')
 
+    parser.add_argument("--use_siar", action='store_true')
+    parser.add_argument("--siar_lamb", type=float, default=0.1)
+    parser.add_argument("--siar_eps", type=float, default=0.1)
+
     args = parser.parse_args()
     assert not (args.lora_pretrained and args.fine_tune_mode == 'lora'), "Cannot do lora on model that was pretrained with lora"
     return args
@@ -310,18 +302,23 @@ if __name__ == '__main__':
     sst_test_data, *_= load_multitask_data(args.sst_test,args.para_test, args.sts_test, split='test')
 
     if args.fine_tune_mode == 'lora':
-        lora_details = f'-{args.lora_rank}-{args.lora_svd_init}'
+        lora_details = f'-lora-{args.lora_rank}-{args.lora_svd_init}'
     else:
         lora_details = ''
+    
+    if args.use_siar:
+        siar_details = f'-siar-{args.siar_lamb}-{args.siar_eps}'
+    else:
+        siar_details = ''
 
     if args.use_bagging:
         bagg_details = f'-bagg-{args.n_models_bagging}'
     else:
         bagg_details = ''
     
-    args.dump_checkpoint_path = f'ft-{bagg_details}-{lora_details}-{args.epochs}{args.load_checkpoint_path}' # Save path.
-    args.sst_dev_out = f"{args.sst_dev_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
-    args.sst_test_out = f"{args.sst_test_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
+    args.dump_checkpoint_path = f'ft{bagg_details}{siar_details}{lora_details}-{args.epochs}{args.load_checkpoint_path}' # Save path.
+    args.sst_dev_out = f"{args.sst_dev_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
+    args.sst_test_out = f"{args.sst_test_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
     
     print("=== Finetuning SST BERT ===")
     
@@ -334,5 +331,3 @@ if __name__ == '__main__':
     write_pred_file(dev_pred_dict, args.sst_dev_out)
     write_pred_file(test_pred_dict, args.sst_test_out)
 
-    #print("=== Test Fined SST BERT ===")
-    #test(args)

@@ -25,7 +25,6 @@ from bert import BertModel
 from transformers import AdamW
 from tqdm import tqdm
 import math
-import optuna
 
 from datasets import (
     SentenceClassificationDataset,
@@ -87,13 +86,31 @@ class MultitaskBERT(nn.Module):
                     param.requires_grad = False
                 elif config.fine_tune_mode == 'full-model':
                     param.requires_grad = True
-        
-        # You will want to add layers here to perform the downstream tasks.
-        ### TODO
+
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.sentiment_classifier = nn.Linear(BERT_HIDDEN_SIZE, N_SENTIMENT_CLASSES)
-        self.paraphrase_classifier = nn.Linear(BERT_HIDDEN_SIZE * 2, 1)
-        self.similarity_classifier = nn.Linear(BERT_HIDDEN_SIZE * 2, 1)
+
+        # TODO, tune the proj, is it to much to have two activations(and hidden layers)
+        self.paraphrase_proj = nn.Sequential(
+            nn.Linear(BERT_HIDDEN_SIZE, int(BERT_HIDDEN_SIZE / 2)),
+            nn.Dropout(0.1),
+            nn.GELU(),
+            nn.Linear(int(BERT_HIDDEN_SIZE / 2), int(BERT_HIDDEN_SIZE / 4)),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(int(BERT_HIDDEN_SIZE / 4), int(BERT_HIDDEN_SIZE / 8)),
+            nn.Dropout(config.hidden_dropout_prob),
+        )
+        self.paraphrase_classifier = nn.Linear(int(BERT_HIDDEN_SIZE / 8) * 2, 1)
+        
+        self.similarity_proj = nn.Sequential(
+            nn.Linear(BERT_HIDDEN_SIZE, int(BERT_HIDDEN_SIZE / 2)),
+            nn.Dropout(0.1),
+            nn.GELU(),
+            nn.Linear(int(BERT_HIDDEN_SIZE / 2), int(BERT_HIDDEN_SIZE / 8)),
+            nn.GELU(),
+            nn.Dropout(0.1)
+        )
 
         # SIAR parameters
         self.siar_lamb = config.siar_lamb
@@ -105,7 +122,6 @@ class MultitaskBERT(nn.Module):
         # Here, you can start by just returning the embeddings straight from BERT.
         # When thinking of improvements, you can later try modifying this
         # (e.g., by adding other layers).
-        ### TODO
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
         cls_embedding = outputs['last_hidden_state'][:, 0, :]
         cls_embedding = self.dropout(cls_embedding)
@@ -114,7 +130,6 @@ class MultitaskBERT(nn.Module):
     # SIAR =========================
     def forward_with_noise(self, input_ids, attention_mask):
         'Produces noisy embeddings for the sentences, used for SIAR.'
-        ### TODO
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
         cls_embedding = outputs['last_hidden_state'][:, 0, :]
         cls_embedding = self.dropout(cls_embedding)
@@ -127,7 +142,6 @@ class MultitaskBERT(nn.Module):
         (0 - negative, 1- somewhat negative, 2- neutral, 3- somewhat positive, 4- positive)
         Thus, your output should contain 5 logits for each sentence.
         '''
-        ### TODO
         cls_embedding = self.forward(input_ids, attention_mask)
         logits = self.sentiment_classifier(cls_embedding)
         return logits
@@ -139,9 +153,8 @@ class MultitaskBERT(nn.Module):
         Note that your output should be unnormalized (a logit); it will be passed to the sigmoid function
         during evaluation.
         '''
-        ### TODO
-        cls_embedding_1 = self.forward(input_ids_1, attention_mask_1)
-        cls_embedding_2 = self.forward(input_ids_2, attention_mask_2)
+        cls_embedding_1 = self.paraphrase_proj(self.forward(input_ids_1, attention_mask_1))
+        cls_embedding_2 = self.paraphrase_proj(self.forward(input_ids_2, attention_mask_2))
         cls_embedding = torch.cat([cls_embedding_1, cls_embedding_2], dim=1)
 
         logits = self.paraphrase_classifier(cls_embedding)
@@ -154,12 +167,10 @@ class MultitaskBERT(nn.Module):
         '''Given a batch of pairs of sentences, outputs a single logit corresponding to how similar they are.
         Note that your output should be unnormalized (a logit).
         '''
-        ### TODO
-        cls_embedding_1 = self.forward(input_ids_1, attention_mask_1)
-        cls_embedding_2 = self.forward(input_ids_2, attention_mask_2)
-        cls_embedding = torch.cat([cls_embedding_1, cls_embedding_2], dim=1)
+        cls_embedding_1 = self.similarity_proj(self.forward(input_ids_1, attention_mask_1))
+        cls_embedding_2 = self.similarity_proj(self.forward(input_ids_2, attention_mask_2))
+        logits = 5 * F.cosine_similarity(cls_embedding_1, cls_embedding_2, dim=1).unsqueeze(1)
 
-        logits = self.similarity_classifier(cls_embedding)
         return logits
     
     # SIAR =========================
@@ -171,8 +182,8 @@ class MultitaskBERT(nn.Module):
     def predict_paraphrase_siar(self,
                            input_ids_1, attention_mask_1,
                            input_ids_2, attention_mask_2):
-        cls_embedding_1 = self.forward_with_noise(input_ids_1, attention_mask_1)
-        cls_embedding_2 = self.forward_with_noise(input_ids_2, attention_mask_2)
+        cls_embedding_1 = self.paraphrase_proj(self.forward_with_noise(input_ids_1, attention_mask_1))
+        cls_embedding_2 = self.paraphrase_proj(self.forward_with_noise(input_ids_2, attention_mask_2))
         cls_embedding = torch.cat([cls_embedding_1, cls_embedding_2], dim=1)
 
         logits = self.paraphrase_classifier(cls_embedding)
@@ -181,11 +192,10 @@ class MultitaskBERT(nn.Module):
     def predict_similarity_siar(self,
                            input_ids_1, attention_mask_1,
                            input_ids_2, attention_mask_2):
-        cls_embedding_1 = self.forward_with_noise(input_ids_1, attention_mask_1)
-        cls_embedding_2 = self.forward_with_noise(input_ids_2, attention_mask_2)
-        cls_embedding = torch.cat([cls_embedding_1, cls_embedding_2], dim=1)
+        cls_embedding_1 = self.similarity_proj(self.forward_with_noise(input_ids_1, attention_mask_1))
+        cls_embedding_2 = self.similarity_proj(self.forward_with_noise(input_ids_2, attention_mask_2))
+        logits = 5 * F.cosine_similarity(cls_embedding_1, cls_embedding_2, dim=1).unsqueeze(1)
 
-        logits = self.similarity_classifier(cls_embedding)
         return logits
     
     def siar_reg_loss_sentiment(self, input_ids, attention_mask):
@@ -225,6 +235,16 @@ def save_model(model, optimizer, args, config, filepath):
 
     torch.save(save_info, filepath)
     print(f"save the model to {filepath}")
+
+def save_checkpoint(checkpoint_path, bert, classifier=None, projector=None):
+    save_info = {
+        'bert': bert.cpu().state_dict(),
+        'classifier': classifier.cpu().state_dict() if classifier else None,
+        'projector': projector.cpu().state_dict() if projector else None
+    }
+        
+    torch.save(save_info, checkpoint_path)
+    print(f"save the model checkpoint to {checkpoint_path}") 
 
 def train_multitask(args):
     '''Train MultitaskBERT on all three tasks simultaneously.'''
@@ -436,6 +456,10 @@ def train_multitask(args):
         if dev_acc > best_dev_acc:
             best_dev_acc = dev_acc
             save_model(model, optimizer, args, config, args.filepath)
+            save_checkpoint(f'sst_{args.filepath}', model.bert, model.sentiment_classifier)
+            save_checkpoint(f'para_{args.filepath}', model.bert, model.paraphrase_classifier, model.paraphrase_proj)
+            save_checkpoint( f'sts_{args.filepath}', model.bert, None, model.similarity_proj)
+
 
         print(f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}")
         
@@ -447,6 +471,8 @@ def train_multitask(args):
 
         print(f'Semantic Textual Similarity train correlation: {sts_train_corr:.3f}')
         print(f'Semantic Textual Similarity dev correlation: {sts_dev_corr:.3f}')
+    
+
 
 
 def test_multitask(args):
@@ -543,7 +569,7 @@ def get_args():
     parser.add_argument("--sst_test", type=str, default="data/ids-sst-test-student.csv")
 
     parser.add_argument("--para_train", type=str, default="data/quora-train.csv")
-    parser.add_argument("--para_dev", type=str, default="data/quora-dev.csv")
+    parser.add_argument("--para_dev", type=str, default="data/quora-dev.csv") # TODO use full dev set
     parser.add_argument("--para_test", type=str, default="data/quora-test-student.csv")
 
     parser.add_argument("--sts_train", type=str, default="data/sts-train.csv")
@@ -551,9 +577,9 @@ def get_args():
     parser.add_argument("--sts_test", type=str, default="data/sts-test-student.csv")
 
     parser.add_argument("--seed", type=int, default=11711)
-    parser.add_argument("--epochs", type=int, default=6) # limit to 6 epochs
+    parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--fine-tune-mode", type=str,
-                        choices=('last-linear-layer', 'full-model', 'lora'), default="last-linear-layer")
+                        choices=('last-linear-layer', 'full-model', 'lora'), default="full-model")
     parser.add_argument("--use_gpu", action='store_true')
 
     parser.add_argument("--sst_dev_out", type=str, default="predictions/sst-dev-output-multi")
@@ -575,7 +601,7 @@ def get_args():
     parser.add_argument("--lr_bert", type=float, help="learning rate for bert layers, full or lora",
                         default=1e-5)
     parser.add_argument("--lr_class", type=float, help="learning rate for classification layers",
-                        default=1e-3)
+                        default=1e-4)
     parser.add_argument("--lora_rank", type=int, help="rank of lora adapters",
                         default=8)
     parser.add_argument("--lora_svd_init", action='store_true')
@@ -597,20 +623,23 @@ if __name__ == "__main__":
     print(f'{torch.cuda.is_available()=}')
 
     if args.fine_tune_mode == 'lora':
-        lora_details = f'-{args.lora_rank}-{args.lora_svd_init}'
-    elif args.use_siar:
-        lora_details = f'-{args.siar_lamb}-{args.siar_eps}'
+        lora_details = f'-lora-{args.lora_rank}-{args.lora_svd_init}'
     else:
         lora_details = ''
+    
+    if args.use_siar:
+        siar_details = f'-siar-{args.siar_lamb}-{args.siar_eps}'
+    else:
+        siar_details = ''
 
     # hacky, sorry
-    args.filepath = f'{args.fine_tune_mode}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}-multitask.pt' # Save path.
-    args.sst_dev_out = f"{args.sst_dev_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
-    args.sst_test_out = f"{args.sst_test_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
-    args.para_dev_out = f"{args.para_dev_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
-    args.para_dev_out = f"{args.para_test_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
-    args.sts_dev_out = f"{args.sts_dev_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
-    args.sts_dev_out = f"{args.sts_test_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
+    args.filepath = f'{args.fine_tune_mode}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}-multitask.pt' # Save path.
+    args.sst_dev_out = f"{args.sst_dev_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
+    args.sst_test_out = f"{args.sst_test_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
+    args.para_dev_out = f"{args.para_dev_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
+    args.para_dev_out = f"{args.para_test_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
+    args.sts_dev_out = f"{args.sts_dev_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
+    args.sts_dev_out = f"{args.sts_test_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}.csv"
     
     seed_everything(args.seed)  # Fix the seed for reproducibility.
     print("=== Training Multitask BERT ===")

@@ -27,12 +27,23 @@ BAGG_ADD_NOISE = False
 BERT_HIDDEN_SIZE = 768
 
 class SimilarityBERT(nn.Module):
-    def __init__(self, config, bert_state_dict, classifier_state_dict):
+    def __init__(self, config, bert_state_dict, projector_state_dict):
         super(SimilarityBERT, self).__init__()
         self.bert = BertModel(config, bert_state_dict)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.similarity_classifier = nn.Linear(BERT_HIDDEN_SIZE * 2, 1)
-        self.similarity_classifier.load_state_dict(classifier_state_dict)
+        self.similarity_proj = nn.Sequential(
+            nn.Linear(BERT_HIDDEN_SIZE, int(BERT_HIDDEN_SIZE / 2)),
+            nn.Dropout(0.1),
+            nn.GELU(),
+            nn.Linear(int(BERT_HIDDEN_SIZE / 2), int(BERT_HIDDEN_SIZE / 8)),
+            nn.GELU(),
+            nn.Dropout(0.1)
+        )
+
+        self.similarity_proj.load_state_dict(projector_state_dict)
+
+        self.siar_lamb = config.siar_lamb
+        self.siar_eps = config.siar_eps
 
         assert config.fine_tune_mode in ["last-linear-layer", "full-model", "lora"]
         if config.fine_tune_mode == 'lora':
@@ -60,12 +71,36 @@ class SimilarityBERT(nn.Module):
                            input_ids_2, attention_mask_2):
         '''Given a batch of pairs of sentences, outputs a single logit corresponding to how similar they are.
         Note that your output should be unnormalized (a logit).'''
-        cls_embedding_1 = self.forward(input_ids_1, attention_mask_1)
-        cls_embedding_2 = self.forward(input_ids_2, attention_mask_2)
-        cls_embedding = torch.cat([cls_embedding_1, cls_embedding_2], dim=1)
-
-        logits = self.similarity_classifier(cls_embedding)
+        cls_embedding_1 = self.similarity_proj(self.forward(input_ids_1, attention_mask_1))
+        cls_embedding_2 = self.similarity_proj(self.forward(input_ids_2, attention_mask_2))
+        logits = 5 * F.cosine_similarity(cls_embedding_1, cls_embedding_2, dim=1).unsqueeze(1)
         return logits
+
+    # SIAR =========================
+    def forward_with_noise(self, input_ids, attention_mask):
+        'Produces noisy embeddings for the sentences, used for SIAR.'
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        cls_embedding = outputs['last_hidden_state'][:, 0, :]
+        cls_embedding = self.dropout(cls_embedding)
+        return cls_embedding + self.siar_eps * torch.randn_like(cls_embedding)
+
+    def predict_similarity_siar(self,
+                           input_ids_1, attention_mask_1,
+                           input_ids_2, attention_mask_2):
+        cls_embedding_1 = self.similarity_proj(self.forward_with_noise(input_ids_1, attention_mask_1))
+        cls_embedding_2 = self.similarity_proj(self.forward_with_noise(input_ids_2, attention_mask_2))
+        logits = 5 * F.cosine_similarity(cls_embedding_1, cls_embedding_2, dim=1).unsqueeze(1)
+
+        return logits
+
+    def siar_reg_loss_similarity(self, input_ids_1, attention_mask_1, input_ids_2, attention_mask_2):
+        '''SIAR regularization loss for similarity task.'''
+        logits = self.predict_similarity(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
+        perturbed_logits = self.predict_similarity_siar(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
+        loss = F.kl_div(F.log_softmax(logits, dim=1), F.softmax(perturbed_logits, dim=1), reduction='batchmean')
+
+        return loss
+     # ==============================
 
 def train(args, train_data, dev_data, test_data):
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
@@ -76,10 +111,11 @@ def train(args, train_data, dev_data, test_data):
     test_data = SentencePairTestDataset(test_data, args)
     test_dataloader = DataLoader(test_data, shuffle=True, batch_size=args.batch_size, collate_fn=test_data.collate_fn)
 
-    config = gen_config(args.fine_tune_mode, args.lora_rank, args.lora_svd_init, args.lora_pretrained)
+    config = gen_config(args.fine_tune_mode, args.lora_rank, args.lora_svd_init, args.lora_pretrained,
+                        args.use_siar, args.siar_lamb, args.siar_eps)
+    
     saved_checkpoint = torch.load(args.load_checkpoint_path)
-
-    model = SimilarityBERT(config, saved_checkpoint['bert'] , saved_checkpoint['classifier'])
+    model = SimilarityBERT(config, saved_checkpoint['bert'] , saved_checkpoint['projector'])
     
     if args.use_bagging and BAGG_ADD_NOISE:
         model = add_relative_weight_noise(model, noise_std=0.1) # the std value is arbitrary, not tuned
@@ -115,6 +151,9 @@ def train(args, train_data, dev_data, test_data):
             optimizer.zero_grad()
             sts_logits = model.predict_similarity(sts_ids1, sts_mask1, sts_ids2, sts_mask2)
             loss = F.mse_loss(sts_logits.view(-1), sts_scores.view(-1), reduction='sum') / batch_size
+            if args.use_siar:
+                loss += args.siar_lamb * model.siar_reg_loss_similarity(sts_ids1, sts_mask1, sts_ids2, sts_mask2)/batch_size
+            
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
@@ -192,7 +231,8 @@ def write_pred_file(pred_dict, filepath):
                 f.write(f"{p} , {s} \n")      
 
         
-def gen_config(fine_tune_mode, lora_rank=None, lora_svd_init=None, lora_pretrained=False):
+def gen_config(fine_tune_mode, lora_rank=None, lora_svd_init=None, lora_pretrained=False,
+               use_siar=False, siar_lamb=None, siar_eps=None):
     config = {
         "hidden_size": 768,
         "data_dir": '.',
@@ -215,7 +255,10 @@ def gen_config(fine_tune_mode, lora_rank=None, lora_svd_init=None, lora_pretrain
         "gradient_checkpointing": False,
         "position_embedding_type": "absolute",
         "use_cache": True,
-        "lora_post": lora_pretrained
+        "lora_post": lora_pretrained,
+        "use_siar": use_siar,
+        "siar_lamb": siar_lamb,
+        "siar_eps": siar_eps
     }
 
     return SimpleNamespace(**config)
@@ -236,12 +279,12 @@ def get_args():
     parser.add_argument("--para_test", type=str, default="data/quora-test-student.csv")
     ##############################################################################
 
-    parser.add_argument("--load_checkpoint_path", type=str, default="sts_full-model-10-1e-05-0.0001-multitask.pt")
+    parser.add_argument("--load_checkpoint_path", type=str, default="sts_full-model-siar-0.1-0.1-1-1e-05-0.0001-multitask.pt")
 
     parser.add_argument("--seed", type=int, default=11711)
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--fine-tune-mode", type=str,
-                        choices=('last-linear-layer', 'full-model', 'lora'), default="last-linear-layer")
+                        choices=('last-linear-layer', 'full-model', 'lora'), default="full-model")
     parser.add_argument("--use_gpu", action='store_true')
 
     parser.add_argument("--sts_dev_out", type=str, default="predictions/sts-dev-output-ft")
@@ -262,6 +305,10 @@ def get_args():
     parser.add_argument('--n_models_bagging', type=int, help='Number of models to use in bagging ensamble', default=10)
     parser.add_argument("--save_checkpoints", action='store_true')
 
+    parser.add_argument("--use_siar", action='store_true')
+    parser.add_argument("--siar_lamb", type=float, default=0.1)
+    parser.add_argument("--siar_eps", type=float, default=0.1)
+
     args = parser.parse_args()
     assert not (args.lora_pretrained and args.fine_tune_mode == 'lora'), "Cannot do lora on model that was pretrained with lora"
     return args
@@ -274,18 +321,23 @@ if __name__ == '__main__':
     _, _, _, sts_test_data= load_multitask_data(args.sst_test,args.para_test, args.sts_test, split='test')
 
     if args.fine_tune_mode == 'lora':
-        lora_details = f'-{args.lora_rank}-{args.lora_svd_init}'
+        lora_details = f'-lora-{args.lora_rank}-{args.lora_svd_init}'
     else:
         lora_details = ''
+    
+    if args.use_siar:
+        siar_details = f'-siar-{args.siar_lamb}-{args.siar_eps}'
+    else:
+        siar_details = ''
 
     if args.use_bagging:
         bagg_details = f'-bagg-{args.n_models_bagging}'
     else:
         bagg_details = ''
     
-    args.dump_checkpoint_path = f'ft-{bagg_details}-{lora_details}-{args.epochs}{args.load_checkpoint_path}' # Save path.
-    args.sts_dev_out = f"{args.sts_dev_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
-    args.sts_test_out = f"{args.sts_test_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
+    args.dump_checkpoint_path = f'ft-{bagg_details}{siar_details}{lora_details}-{args.epochs}{args.load_checkpoint_path}' # Save path.
+    args.sts_dev_out = f"{args.sts_dev_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
+    args.sts_test_out = f"{args.sts_test_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
     
     print("=== Finetuning STS BERT ===")
     

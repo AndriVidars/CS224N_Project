@@ -26,12 +26,28 @@ BAGG_ADD_NOISE = False
 BERT_HIDDEN_SIZE = 768
 
 class ParaphraseBERT(nn.Module):
-    def __init__(self, config, bert_state_dict, classifier_state_dict):
+    def __init__(self, config, bert_state_dict, classifier_state_dict, projector_state_dict):
         super(ParaphraseBERT, self).__init__()
         self.bert = BertModel(config, bert_state_dict)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.paraphrase_classifier = nn.Linear(BERT_HIDDEN_SIZE * 2, 1)
+
+        self.paraphrase_proj = nn.Sequential(
+            nn.Linear(BERT_HIDDEN_SIZE, int(BERT_HIDDEN_SIZE / 2)),
+            nn.Dropout(0.1),
+            nn.GELU(),
+            nn.Linear(int(BERT_HIDDEN_SIZE / 2), int(BERT_HIDDEN_SIZE / 4)),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(int(BERT_HIDDEN_SIZE / 4), int(BERT_HIDDEN_SIZE / 8)),
+            nn.Dropout(config.hidden_dropout_prob),
+        )
+        self.paraphrase_classifier = nn.Linear(int(BERT_HIDDEN_SIZE / 8) * 2, 1)
+
+        self.siar_lamb = config.siar_lamb
+        self.siar_eps = config.siar_eps
+        
         self.paraphrase_classifier.load_state_dict(classifier_state_dict)
+        self.paraphrase_proj.load_state_dict(projector_state_dict)
 
         assert config.fine_tune_mode in ["last-linear-layer", "full-model", "lora"]
         if config.fine_tune_mode == 'lora':
@@ -61,12 +77,38 @@ class ParaphraseBERT(nn.Module):
         Note that your output should be unnormalized (a logit); it will be passed to the sigmoid function
         during evaluation.
         '''
-        cls_embedding_1 = self.forward(input_ids_1, attention_mask_1)
-        cls_embedding_2 = self.forward(input_ids_2, attention_mask_2)
+        cls_embedding_1 = self.paraphrase_proj(self.forward(input_ids_1, attention_mask_1))
+        cls_embedding_2 = self.paraphrase_proj(self.forward(input_ids_2, attention_mask_2))
         cls_embedding = torch.cat([cls_embedding_1, cls_embedding_2], dim=1)
 
         logits = self.paraphrase_classifier(cls_embedding)
         return logits
+    
+    # SIAR =========================
+    def forward_with_noise(self, input_ids, attention_mask):
+        'Produces noisy embeddings for the sentences, used for SIAR.'
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        cls_embedding = outputs['last_hidden_state'][:, 0, :]
+        cls_embedding = self.dropout(cls_embedding)
+        return cls_embedding + self.siar_eps * torch.randn_like(cls_embedding)
+    
+    def predict_paraphrase_siar(self,
+                           input_ids_1, attention_mask_1,
+                           input_ids_2, attention_mask_2):
+        cls_embedding_1 = self.paraphrase_proj(self.forward_with_noise(input_ids_1, attention_mask_1))
+        cls_embedding_2 = self.paraphrase_proj(self.forward_with_noise(input_ids_2, attention_mask_2))
+        cls_embedding = torch.cat([cls_embedding_1, cls_embedding_2], dim=1)
+
+        logits = self.paraphrase_classifier(cls_embedding)
+        return logits
+    
+    def siar_reg_loss_paraphrase(self, input_ids_1, attention_mask_1, input_ids_2, attention_mask_2):
+        '''SIAR regularization loss for paraphrase detection task.'''
+        logits = self.predict_paraphrase(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
+        perturbed_logits = self.predict_paraphrase_siar(input_ids_1, attention_mask_1, input_ids_2, attention_mask_2)
+        loss = F.kl_div(F.log_softmax(logits, dim=1), F.softmax(perturbed_logits, dim=1), reduction='batchmean')
+        return loss
+    # ==============================
 
 def train(args, train_data, dev_data, test_data):
     device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
@@ -78,10 +120,11 @@ def train(args, train_data, dev_data, test_data):
     test_data = SentencePairTestDataset(test_data, args)
     test_dataloader = DataLoader(test_data, shuffle=True, batch_size=args.batch_size, collate_fn=test_data.collate_fn)
 
-    config = gen_config(args.fine_tune_mode, args.lora_rank, args.lora_svd_init, args.lora_pretrained)
+    config = gen_config(args.fine_tune_mode, args.lora_rank, args.lora_svd_init, args.lora_pretrained,
+                       args.use_siar, args.siar_lamb, args.siar_eps)
     saved_checkpoint = torch.load(args.load_checkpoint_path)
 
-    model = ParaphraseBERT(config, saved_checkpoint['bert'] , saved_checkpoint['classifier'])
+    model = ParaphraseBERT(config, saved_checkpoint['bert'] , saved_checkpoint['classifier'], saved_checkpoint['projector'])
     
     if args.use_bagging and BAGG_ADD_NOISE:
         model = add_relative_weight_noise(model, noise_std=0.1) # the std value is arbitrary, not tuned
@@ -119,6 +162,8 @@ def train(args, train_data, dev_data, test_data):
             optimizer.zero_grad()
             para_logits = model.predict_paraphrase(para_ids1, para_mask1, para_ids2, para_mask2)
             loss = F.binary_cross_entropy_with_logits(para_logits.view(-1), para_labels.view(-1), reduction='sum') / batch_size
+            if args.use_siar:
+                loss += args.siar_lamb + model.siar_reg_loss_paraphrase(para_ids1, para_mask1, para_ids2, para_mask2)/ batch_size
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
@@ -181,6 +226,7 @@ def save_checkpoint(model, config, dump_checkpoint_path):
     save_info = {
         'bert': model.bert.cpu().state_dict(),
         'classifier': model.paraphrase_classifier.cpu().state_dict(),
+        'projector': model.paraphraphrase_proj.cpu().state_dict(),
         'config': config
     }
     torch.save(save_info, dump_checkpoint_path)
@@ -193,7 +239,8 @@ def write_pred_file(pred_dict, filepath):
                 f.write(f"{p} , {s} \n")      
 
         
-def gen_config(fine_tune_mode, lora_rank=None, lora_svd_init=None, lora_pretrained=False):
+def gen_config(fine_tune_mode, lora_rank=None, lora_svd_init=None, lora_pretrained=False,
+               use_siar=False, siar_lamb=None, siar_eps=None):
     config = {
         "hidden_size": 768,
         "data_dir": '.',
@@ -216,7 +263,10 @@ def gen_config(fine_tune_mode, lora_rank=None, lora_svd_init=None, lora_pretrain
         "gradient_checkpointing": False,
         "position_embedding_type": "absolute",
         "use_cache": True,
-        "lora_post": lora_pretrained
+        "lora_post": lora_pretrained,
+        "use_siar": use_siar,
+        "siar_lamb": siar_lamb,
+        "siar_eps": siar_eps
     }
 
     return SimpleNamespace(**config)
@@ -236,12 +286,12 @@ def get_args():
     parser.add_argument("--sts_test", type=str, default="data/sts-test-student.csv")
     ##############################################################################
 
-    parser.add_argument("--load_checkpoint_path", type=str, default="para_full-model-10-1e-05-0.0001-multitask.pt")
+    parser.add_argument("--load_checkpoint_path", type=str, default="para_full-model-siar-0.1-0.1-1-1e-05-0.0001-multitask.pt")
 
     parser.add_argument("--seed", type=int, default=11711)
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--fine-tune-mode", type=str,
-                        choices=('last-linear-layer', 'full-model', 'lora'), default="last-linear-layer")
+                        choices=('last-linear-layer', 'full-model', 'lora'), default="full-model")
     parser.add_argument("--use_gpu", action='store_true')
 
     parser.add_argument("--para_dev_out", type=str, default="predictions/para-dev-output-ft")
@@ -255,13 +305,17 @@ def get_args():
                         default=32)
     parser.add_argument("--lora_svd_init", action='store_true')
     parser.add_argument("--lora_pretrained", action='store_true') # multitask model was trained with lora
-    parser.add_argument("--batch_size", type=int, default=64) 
+    parser.add_argument("--batch_size", type=int, default=16) 
     parser.add_argument("--weight_decay", type=float, default=0.0)
 
     parser.add_argument("--use_bagging", action='store_true')
     parser.add_argument('--n_models_bagging', type=int, help='Number of models to use in bagging ensamble', default=10)
     parser.add_argument("--save_checkpoints", action='store_true')
     parser.add_argument("--train_ratio", type=float, default=1.0) # this is very computationally expensive, use 0.25
+
+    parser.add_argument("--use_siar", action='store_true')
+    parser.add_argument("--siar_lamb", type=float, default=0.1)
+    parser.add_argument("--siar_eps", type=float, default=0.1)
 
     args = parser.parse_args()
     assert not (args.lora_pretrained and args.fine_tune_mode == 'lora'), "Cannot do lora on model that was pretrained with lora"
@@ -275,18 +329,23 @@ if __name__ == '__main__':
     _, _, para_test_data, *_= load_multitask_data(args.sst_test,args.para_test, args.sts_test, split='test')
 
     if args.fine_tune_mode == 'lora':
-        lora_details = f'-{args.lora_rank}-{args.lora_svd_init}'
+        lora_details = f'-lora-{args.lora_rank}-{args.lora_svd_init}'
     else:
         lora_details = ''
+    
+    if args.use_siar:
+        siar_details = f'-siar-{args.siar_lamb}-{args.siar_eps}'
+    else:
+        siar_details = ''
 
     if args.use_bagging:
         bagg_details = f'-bagg-{args.n_models_bagging}'
     else:
         bagg_details = ''
     
-    args.dump_checkpoint_path = f'ft-{bagg_details}-{lora_details}-{args.epochs}{args.load_checkpoint_path}' # Save path.
-    args.para_dev_out = f"{args.para_dev_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
-    args.para_test_out = f"{args.para_test_out}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
+    args.dump_checkpoint_path = f'ft{bagg_details}{siar_details}{lora_details}-{args.epochs}{args.load_checkpoint_path}' # Save path.
+    args.para_dev_out = f"{args.para_dev_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
+    args.para_test_out = f"{args.para_test_out}{siar_details}{lora_details}-{args.epochs}-{args.lr_bert}-{args.lr_class}{bagg_details}-ft.csv"
     
     print("=== Finetuning Para BERT ===")
     

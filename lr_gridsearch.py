@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from classifier import train
+import pickle
 
 def get_config(lr_bert, lr_class, weight_decay, fine_tune_mode):
     return SimpleNamespace(
@@ -31,8 +32,11 @@ def gridsearch(params_list):
 
 
 if __name__ == '__main__':
-    lr_bert = [1e-6, 5e-6, 1e-5]
-    lr_class = [5e-5, 1e-4, 5e-4]
+    #lr_bert = [5e-6, 1e-5]
+    #lr_class = [1e-5, 5e-5, 1e-4]
+
+    lr_bert = [5e-6, 8e-6, 1e-5, 2e-5, 3e-5, 4e-5, 5e-5]
+    lr_class = [1e-5, 5e-5, 7.5e-5, 1e-4]
     
     params = [{'lr_bert': lb, 'lr_class': lc, 'weight_decay':0.0, 'fine_tune_mode': 'full-model'} 
               for lb in lr_bert for lc in lr_class]
@@ -40,3 +44,6 @@ if __name__ == '__main__':
     results = gridsearch(params)
     # todo, write results to file
     print(results)
+
+    with open('grid.pkl', 'wb') as f:
+        pickle.dump(results, f)
