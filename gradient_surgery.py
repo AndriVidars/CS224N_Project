@@ -28,6 +28,7 @@ from tqdm import tqdm
 import random
 import math
 
+
 from datasets import (
     SentenceClassificationDataset,
     SentenceClassificationTestDataset,
@@ -152,9 +153,10 @@ class MultitaskBERT(nn.Module):
 
 
 def save_model(model, optimizer, args, config, filepath):
+    optimizer_state_dict = optimizer.optimizer.state_dict()
     save_info = {
         'model': model.state_dict(),
-        'optim': optimizer.state_dict(),
+        'optim': optimizer_state_dict, #optimizer.state_dict(),
         'args': args,
         'model_config': config,
         'system_rng': random.getstate(),
@@ -452,9 +454,9 @@ def get_args():
     parser.add_argument("--sts_test_out", type=str, default="predictions/sts-test-output-multi")
     
     # different batch sizes for each task
-    parser.add_argument("--batch_size_sst", type=int, default=8) # dont know the memory cap, 32
-    parser.add_argument("--batch_size_para", type=int, default=16) # 64
-    parser.add_argument("--batch_size_sts", type=int, default=8) #32
+    parser.add_argument("--batch_size_sst", type=int, default=4) # dont know the memory cap, 32
+    parser.add_argument("--batch_size_para", type=int, default=8) # 64
+    parser.add_argument("--batch_size_sts", type=int, default=4) #32
     parser.add_argument("--train_ratio_sst", type=float, default=1.0)
     parser.add_argument("--train_ratio_para", type=float, default=0.25) # by default not train on all quora data
     parser.add_argument("--train_ratio_sts", type=float, default=1.0)
@@ -475,6 +477,7 @@ def get_args():
 
 
 if __name__ == "__main__":
+    torch.cuda.empty_cache()
     args = get_args()
 
     if args.fine_tune_mode == 'lora':
